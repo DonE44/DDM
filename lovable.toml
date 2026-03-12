@@ -1,0 +1,18 @@
+# DDM Project Configuration for Zig
+
+# The name of the project
+name = "DDM"
+
+# The version of the project
+version = "0.1.0"
+
+# The authors of the project
+authors = ["DonE44"]
+
+# Build settings
+[build]
+  mode = "release"
+
+# Dependencies
+[dependencies]
+  zig-libc = "0.1.0"
