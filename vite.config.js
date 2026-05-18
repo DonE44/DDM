@@ -39,6 +39,10 @@ export default defineConfig({
     include: ['webaudio-tinysynth'],
   },
   build: {
+    // Beta stability: Vite 8's current minifier path can crash Node on this
+    // Windows setup with exit code -1073741795. Keep production builds
+    // unminified until the toolchain is upgraded or pinned to a stable minifier.
+    minify: false,
     // Raise the chunk-size warning threshold to 1500 kB.
     // transformers.js and onnxruntime-web are large intentional third-party
     // dependencies — splitting them further would break their internal loading.

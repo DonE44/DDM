@@ -52,6 +52,25 @@ import {
   SlidersHorizontal, Pencil, X, Camera,
 } from 'lucide-react'
 
+const APP_SETTINGS_KEY = 'fluxaura_app_settings_v1'
+
+function loadAppSettings() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(APP_SETTINGS_KEY) || '{}')
+    return {
+      defaultOutputFolder: typeof parsed.defaultOutputFolder === 'string' ? parsed.defaultOutputFolder : '',
+      reopenLastProject: parsed.reopenLastProject !== false,
+      showLongOperationOverlay: parsed.showLongOperationOverlay !== false,
+    }
+  } catch {
+    return { defaultOutputFolder: '', reopenLastProject: true, showLongOperationOverlay: true }
+  }
+}
+
+function saveAppSettings(settings) {
+  try { localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(settings)) } catch { /* noop */ }
+}
+
 /** @returns {import('./types/desktop-api').SmmPage[]} */
 function seedPages() {
   const p1 = {
@@ -3266,6 +3285,8 @@ function App() {
   const [showHFSettings, setShowHFSettings] = useState(false)
   const [showLyricWizard, setShowLyricWizard] = useState(false)
   const [showScriptExportModal, setShowScriptExportModal] = useState(false)
+  const [showSettingsDlg, setShowSettingsDlg] = useState(false)
+  const [appSettings, setAppSettingsState] = useState(loadAppSettings)
   const [lastUsedColor, setLastUsedColor] = useState('#3cb8be')
   const [hotspotShape, setHotspotShape] = useState('rect')  // active shape for hotspot draw tool
   const [hsDrawing, setHsDrawing] = useState(null)          // {x0,y0,x1,y1} live drag rect
@@ -3280,6 +3301,7 @@ function App() {
   const [mediaResolver, setMediaResolver] = useState(null)
   // null = no unresolved media; { unresolvedEls, resolvedPages, open } = has unresolved
   const [status, setStatus] = useState('Ready')
+  const [globalOperation, setGlobalOperation] = useState(null)
   const [inspectorTab, setInspectorTab] = useState('props')
   // Animation in-editor preview
   const [animPreviewId, setAnimPreviewId] = useState(null)
@@ -3345,6 +3367,13 @@ function App() {
     setAutoSaveIntervalState(v)
     try { localStorage.setItem('mme_autoSaveInterval', String(v)) } catch { /* noop */ }
   }
+  const setAppSettings = useCallback((updates) => {
+    setAppSettingsState((prev) => {
+      const next = typeof updates === 'function' ? updates(prev) : { ...prev, ...updates }
+      saveAppSettings(next)
+      return next
+    })
+  }, [])
   const setShowTimeline = (v) => setPanelVisible(p => {
     const next = { ...p, bottom: typeof v === 'function' ? v(p.bottom) : v }
     try { localStorage.setItem('mme_panelVis', JSON.stringify(next)) } catch { /* noop */ }
@@ -3378,6 +3407,24 @@ function App() {
   const pagesRef = useRef(pages)
   const desktopApi = typeof window !== 'undefined' ? window.smmDesktop : null
 
+  const startGlobalOperation = useCallback((operation) => {
+    setGlobalOperation({
+      title: 'Working...',
+      message: '',
+      progress: null,
+      blocking: false,
+      ...operation,
+    })
+  }, [])
+
+  const updateGlobalOperation = useCallback((updates) => {
+    setGlobalOperation((operation) => operation ? { ...operation, ...updates } : operation)
+  }, [])
+
+  const finishGlobalOperation = useCallback(() => {
+    setGlobalOperation(null)
+  }, [])
+
   const refreshMediaCacheInfo = useCallback(async () => {
     if (!desktopApi?.mediaCacheStats) {
       setMediaCacheInfo({ ok: false, files: 0, bytes: 0, reason: 'Desktop cache API unavailable' })
@@ -3403,6 +3450,7 @@ function App() {
     const ok = window.confirm('Clear the transcoded media cache? Original project media will not be deleted.')
     if (!ok) return
     setMediaCacheBusy(true)
+    startGlobalOperation({ title: 'Clearing Media Cache', message: 'Removing generated transcode files...', progress: null })
     try {
       const result = await desktopApi.clearMediaCache()
       setMediaCacheInfo(result || { ok: false, files: 0, bytes: 0, reason: 'No clear result returned' })
@@ -3415,9 +3463,10 @@ function App() {
       setStatus(`Media cache clear failed: ${error?.message || String(error)}`)
     } finally {
       setMediaCacheBusy(false)
+      finishGlobalOperation()
       void refreshMediaCacheInfo()
     }
-  }, [desktopApi, refreshMediaCacheInfo])
+  }, [desktopApi, refreshMediaCacheInfo, startGlobalOperation, finishGlobalOperation])
 
   // Safety-net: if the sync port read in the module body returned 0 (e.g., web-only
   // mode with no smmDesktop), try the async IPC path. In normal Electron operation
@@ -3438,6 +3487,7 @@ function App() {
   useEffect(() => {
     if (_startupDoneRef.current) return
     _startupDoneRef.current = true
+    if (!appSettings.reopenLastProject) return
 
     // Dev mode: try disk auto-save first (localStorage is per-PID ephemeral in dev)
     if (desktopApi?.restoreAutoSave) {
@@ -5435,12 +5485,18 @@ function App() {
       fileRef.current?.click()
       return true
     }
-    const result = await desktopApi.openMme()
-    if (result?.canceled) {
-      setStatus('Open canceled')
-      return false
+    startGlobalOperation({ title: 'Opening Project', message: 'Waiting for file selection...', progress: null })
+    try {
+      const result = await desktopApi.openMme()
+      if (result?.canceled) {
+        setStatus('Open canceled')
+        return false
+      }
+      updateGlobalOperation({ message: 'Parsing project file...' })
+      return await applyParsedScript(result.content || '', result.fileName || 'Untitled.mme')
+    } finally {
+      finishGlobalOperation()
     }
-    return await applyParsedScript(result.content || '', result.fileName || 'Untitled.mme')
   }
 
   function onOpenFile(ev) {
@@ -5478,39 +5534,50 @@ function App() {
     }))
     if (lostMedia.length) setStatus(`⚠ ${lostMedia.length} media file(s) will not be preserved: ${lostMedia.slice(0, 2).join(', ')}`)
     const mmeText = genMME(pages, stage, { presentationAudio, projectVars })
+    startGlobalOperation({ title: 'Saving Project', message: 'Preparing project file...', progress: null })
     if (desktopApi?.saveMme) {
-      const result = await desktopApi.saveMme({
-        defaultName: filename.endsWith('.mme') ? filename : 'script.mme',
-        text: mmeText,
-      })
-      if (!result?.canceled) {
-        const savedName = result.fileName || filename
-        setFilename(savedName)
-        setStatus(`Saved: ${savedName}`)
-        try {
-          localStorage.setItem('mme_lastSave', mmeText)
-          localStorage.setItem('mme_lastSaveName', savedName)
-          // Keep lastOpened in sync with the latest explicit save so restarts always
-          // load this version regardless of which file was last opened via Open dialog.
-          localStorage.setItem('mme_lastOpened', mmeText)
-          localStorage.setItem('mme_lastOpenedName', savedName)
-        } catch { /* quota exceeded — skip */ }
-        return true
+      try {
+        updateGlobalOperation({ message: 'Waiting for save location...' })
+        const result = await desktopApi.saveMme({
+          defaultName: filename.endsWith('.mme') ? filename : 'script.mme',
+          text: mmeText,
+        })
+        if (!result?.canceled) {
+          const savedName = result.fileName || filename
+          setFilename(savedName)
+          setStatus(`Saved: ${savedName}`)
+          updateGlobalOperation({ message: 'Updating recovery checkpoint...' })
+          try {
+            localStorage.setItem('mme_lastSave', mmeText)
+            localStorage.setItem('mme_lastSaveName', savedName)
+            // Keep lastOpened in sync with the latest explicit save so restarts always
+            // load this version regardless of which file was last opened via Open dialog.
+            localStorage.setItem('mme_lastOpened', mmeText)
+            localStorage.setItem('mme_lastOpenedName', savedName)
+          } catch { /* quota exceeded — skip */ }
+          return true
+        }
+        setStatus('Save canceled')
+        return false
+      } finally {
+        finishGlobalOperation()
       }
-      setStatus('Save canceled')
-      return false
     }
 
-    toBlobDownload(mmeText, filename.endsWith('.mme') ? filename : 'script.mme')
     try {
-      const blobSaveName = filename.endsWith('.mme') ? filename : 'script.mme'
-      localStorage.setItem('mme_lastSave', mmeText)
-      localStorage.setItem('mme_lastSaveName', blobSaveName)
-      localStorage.setItem('mme_lastOpened', mmeText)
-      localStorage.setItem('mme_lastOpenedName', blobSaveName)
-    } catch { /* quota exceeded — skip */ }
-    setStatus('Saved')
-    return true
+      toBlobDownload(mmeText, filename.endsWith('.mme') ? filename : 'script.mme')
+      try {
+        const blobSaveName = filename.endsWith('.mme') ? filename : 'script.mme'
+        localStorage.setItem('mme_lastSave', mmeText)
+        localStorage.setItem('mme_lastSaveName', blobSaveName)
+        localStorage.setItem('mme_lastOpened', mmeText)
+        localStorage.setItem('mme_lastOpenedName', blobSaveName)
+      } catch { /* quota exceeded — skip */ }
+      setStatus('Saved')
+      return true
+    } finally {
+      finishGlobalOperation()
+    }
   }
 
   async function onExportScreenPng() {
@@ -5569,6 +5636,7 @@ function App() {
   async function importPdfAsStorybook(pdfFile, password = '') {
     setStatus('Loading PDF library…')
     setPdfImportProgress({ page: 0, total: 0, msg: 'Loading PDF…' })
+    startGlobalOperation({ title: 'Importing PDF', message: 'Loading PDF library...', progress: 5, blocking: false })
     try {
       const pdfjsLib = await import('pdfjs-dist')
       pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -5583,12 +5651,14 @@ function App() {
       const pdf = await pdfjsLib.getDocument(loadParams).promise
       const totalPages = pdf.numPages
       setPdfImportProgress({ page: 0, total: totalPages, msg: `Rendering ${totalPages} pages…` })
+      updateGlobalOperation({ message: `Rendering ${totalPages} pages...`, progress: 10 })
 
       const scale = 2.0 // render at 2× for crisp output
       const newPages = /** @type {import('./types/desktop-api').SmmPage[]} */ ([])
 
       for (let i = 1; i <= totalPages; i++) {
         setPdfImportProgress({ page: i, total: totalPages, msg: `Rendering page ${i} of ${totalPages}…` })
+        updateGlobalOperation({ message: `Rendering page ${i} of ${totalPages}...`, progress: Math.round((i / totalPages) * 90) })
         const pdfPage = await pdf.getPage(i)
         const viewport = pdfPage.getViewport({ scale })
         const canvas = document.createElement('canvas')
@@ -5654,11 +5724,14 @@ function App() {
       })
       setPdfImportProgress(null)
       setStatus(`📖 Imported PDF: ${totalPages} page${totalPages !== 1 ? 's' : ''} appended as storybook spreads`)
+      updateGlobalOperation({ message: 'PDF import complete.', progress: 100 })
       requestAnimationFrame(() => fitToWindow())
     } catch (err) {
       setPdfImportProgress(null)
       setStatus(`PDF import failed: ${err.message}`)
       console.error('PDF import error:', err)
+    } finally {
+      finishGlobalOperation()
     }
   }
 
@@ -5666,11 +5739,18 @@ function App() {
   async function exportStorybookPwa(password = '') {
     if (!pages.length) { setStatus('Nothing to export'); return }
     setStatus('Building storybook export…')
+    startGlobalOperation({ title: 'Exporting Storybook', message: 'Preparing storybook package...', progress: 5, blocking: true })
 
     try {
+      updateGlobalOperation({ message: 'Loading ZIP engine...', progress: 10 })
       const JSZip = (await import('jszip')).default
       // Resolve all HTTP/blob media server URLs → data: before building the ZIP
-      const resolvedPages = await resolveMediaForExport(pages, (d, t) => setStatus(`Resolving media ${d}/${t}…`))
+      const resolvedPages = await resolveMediaForExport(pages, (d, t) => {
+        const progress = t ? 10 + Math.round((d / t) * 35) : 20
+        setStatus(`Resolving media ${d}/${t}…`)
+        updateGlobalOperation({ message: `Resolving media ${d}/${t}...`, progress })
+      })
+      updateGlobalOperation({ message: 'Collecting storybook assets...', progress: 50 })
       const zip = new JSZip()
       const bookTitle = filename.replace(/\.mme$/i, '') || 'My Storybook'
 
@@ -5724,6 +5804,7 @@ function App() {
       // Encrypt if password provided
       let encrypted = false
       if (password) {
+        updateGlobalOperation({ message: 'Encrypting storybook data...', progress: 65 })
         const enc = new TextEncoder()
         const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey'])
         const salt = crypto.getRandomValues(new Uint8Array(16))
@@ -5743,6 +5824,7 @@ function App() {
       }
 
       zip.file('book.json', bookJson)
+      updateGlobalOperation({ message: 'Building player files...', progress: 75 })
 
       // Generate the HTML player
       const playerHtml = buildStorybookPlayerHtml(bookTitle, stageWidth, stageHeight, encrypted, bookJson)
@@ -5770,15 +5852,19 @@ function App() {
       zip.file('icon-192.png', dataUrlToUint8(buildPlaceholderIcon(192)))
       zip.file('icon-512.png', dataUrlToUint8(buildPlaceholderIcon(512)))
 
+      updateGlobalOperation({ message: 'Compressing ZIP package...', progress: 88 })
       const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } })
       const outName = `${bookTitle.replace(/[^a-zA-Z0-9_-]/g, '_')}_storybook.zip`
       const _zipHref = URL.createObjectURL(blob)
       const _zipA = document.createElement('a'); _zipA.href = _zipHref; _zipA.download = outName; _zipA.click()
       URL.revokeObjectURL(_zipHref)
+      updateGlobalOperation({ message: 'Storybook export complete.', progress: 100 })
       setStatus(`📖 Exported: ${outName}  (${(blob.size / 1048576).toFixed(1)} MB)`)
     } catch (err) {
       setStatus(`Export failed: ${err.message}`)
       console.error('Storybook export error:', err)
+    } finally {
+      finishGlobalOperation()
     }
   }
 
@@ -6061,12 +6147,14 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
         (capability?.support === 'convert-required' || capability?.support === 'partial')
       ) {
         setStatus(`Converting: ${sourceName}…`)
+        startGlobalOperation({ title: 'Converting Media', message: `Converting ${sourceName}...`, progress: null })
         const transcode = await desktopApi.transcodeMedia({
-          filePath: rawPath,
-          category: capability.category || kind,
-          support: capability.support,
-          extension: capability.extension,
-        })
+            filePath: rawPath,
+            category: capability.category || kind,
+            support: capability.support,
+            extension: capability.extension,
+          })
+          .finally(() => finishGlobalOperation())
 
         if (transcode?.ok && transcode.convertedPath) {
           const convertedPath = transcode.convertedPath
@@ -6281,6 +6369,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
   }
 
   async function exportMediaDiagnosticsReport() {
+    startGlobalOperation({ title: 'Exporting Diagnostics', message: 'Building media diagnostics report...', progress: null })
     const lines = []
     lines.push('FluxAura Studio Media Diagnostics')
     lines.push(`Generated: ${new Date().toISOString()}`)
@@ -6381,21 +6470,30 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
 
     const reportText = lines.join('\n')
     if (desktopApi?.exportMediaDiagnostics) {
-      const result = await desktopApi.exportMediaDiagnostics({
-        defaultName: `media-diagnostics-${Date.now()}.txt`,
-        reportText,
-      })
-      if (result?.canceled) {
-        setStatus('Diagnostics export canceled')
-        return false
+      try {
+        updateGlobalOperation({ message: 'Waiting for diagnostics save location...' })
+        const result = await desktopApi.exportMediaDiagnostics({
+          defaultName: `media-diagnostics-${Date.now()}.txt`,
+          reportText,
+        })
+        if (result?.canceled) {
+          setStatus('Diagnostics export canceled')
+          return false
+        }
+        setStatus(`Diagnostics exported: ${result?.fileName || 'media-diagnostics.txt'}`)
+        return true
+      } finally {
+        finishGlobalOperation()
       }
-      setStatus(`Diagnostics exported: ${result?.fileName || 'media-diagnostics.txt'}`)
-      return true
     }
 
-    toBlobDownload(reportText, 'media-diagnostics.txt', 'text/plain')
-    setStatus('Diagnostics downloaded: media-diagnostics.txt')
-    return true
+    try {
+      toBlobDownload(reportText, 'media-diagnostics.txt', 'text/plain')
+      setStatus('Diagnostics downloaded: media-diagnostics.txt')
+      return true
+    } finally {
+      finishGlobalOperation()
+    }
   }
 
   const drawPlayFrame = useCallback((index) => {
@@ -7140,6 +7238,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
           <button onClick={() => executeCommand('file-export-script')} title="Export .sca script file">Script…</button>
           <button onClick={() => executeCommand('file-export-screen-png')} title="Export full-screen screenshot as PNG">Screen PNG</button>
           <button onClick={() => executeCommand('file-export-page-png')} title="Export current page as PNG">Page PNG</button>
+          <button onClick={() => setShowSettingsDlg(true)} title="FluxAura Studio settings"><Settings size={13}/> Settings</button>
           <button className={spreadView ? 'on' : ''} onClick={() => executeCommand('view-spread')} title="Toggle spread/two-page view" style={{ marginLeft: 4 }}>
             {spreadView ? <><BookOpen size={13}/> Spread</> : <><FileText size={13}/> Single</>}
           </button>
@@ -11307,10 +11406,29 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
             {' '}@ {selectedEl.x},{selectedEl.y} · {selectedEl.w}×{selectedEl.h}
           </span>
         )}
-        <span className="statusmsg">{status}</span>
+        {globalOperation && (
+          <span className="global-operation-chip" title={globalOperation.message || globalOperation.title}>
+            <span className="global-operation-dot" />
+            <span>{globalOperation.title}</span>
+            {typeof globalOperation.progress === 'number' && (
+              <span className="global-operation-progress">{Math.max(0, Math.min(100, Math.round(globalOperation.progress)))}%</span>
+            )}
+          </span>
+        )}
+        <span className="statusmsg">{globalOperation?.message || status}</span>
       </footer>
 
       {showShortcuts && <ShortcutsPanel onClose={() => setShowShortcuts(false)} />}
+      {showSettingsDlg && (
+        <SettingsDialog
+          settings={appSettings}
+          autoSaveInterval={autoSaveInterval}
+          desktopApi={desktopApi}
+          onChangeSettings={setAppSettings}
+          onChangeAutoSave={setAutoSaveInterval}
+          onClose={() => setShowSettingsDlg(false)}
+        />
+      )}
       {mediaResolver?.open && (
         <MediaResolveDialog
           state={mediaResolver}
@@ -11348,6 +11466,24 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
               </div>
             )}
             <div className="sb-overlay-sub">{pdfImportProgress.page > 0 ? `${pdfImportProgress.page} / ${pdfImportProgress.total} pages` : ''}</div>
+          </div>
+        </div>
+      )}
+
+      {globalOperation?.blocking && appSettings.showLongOperationOverlay && !pdfImportProgress && (
+        <div className="sb-overlay">
+          <div className="sb-overlay-box">
+            <div className="sb-overlay-title">{globalOperation.title}</div>
+            <div className="sb-overlay-msg">{globalOperation.message}</div>
+            {typeof globalOperation.progress === 'number' && (
+              <div className="sb-progress-bar-wrap">
+                <div
+                  className="sb-progress-bar"
+                  style={{ width: `${Math.max(0, Math.min(100, Math.round(globalOperation.progress)))}%` }}
+                />
+              </div>
+            )}
+            <div className="sb-overlay-sub">Please wait for this operation to finish.</div>
           </div>
         </div>
       )}
@@ -11417,6 +11553,8 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
           projectVars={projectVars}
           filename={filename}
           presentationAudio={presentationAudio?.file ? presentationAudio : undefined}
+          defaultOutputFolder={appSettings.defaultOutputFolder}
+          onDefaultOutputFolderChange={(folder) => setAppSettings({ defaultOutputFolder: folder })}
           onClose={() => setShowPublishDlg(false)}
           onStatus={setStatus}
           onExportScript={() => { setShowPublishDlg(false); onExportScript() }}
@@ -11519,6 +11657,92 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
 }
 
 // ──────────────────────────────────────────────────────────────
+function SettingsDialog({ settings, autoSaveInterval, desktopApi, onChangeSettings, onChangeAutoSave, onClose }) {
+  const [folderBusy, setFolderBusy] = useState(false)
+
+  const chooseOutputFolder = async () => {
+    if (!desktopApi?.selectFolder || folderBusy) return
+    setFolderBusy(true)
+    try {
+      const result = await desktopApi.selectFolder()
+      if (!result?.canceled && result?.folderPath) {
+        onChangeSettings({ defaultOutputFolder: result.folderPath })
+      }
+    } finally {
+      setFolderBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box settings-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-dialog-head">
+          <div>
+            <h3>FluxAura Studio Settings</h3>
+            <p>Persistent preferences for beta testing and everyday authoring.</p>
+          </div>
+          <button className="settings-dialog-close" onClick={onClose} title="Close settings" aria-label="Close settings">
+            <X size={15} />
+          </button>
+        </div>
+
+        <section className="settings-section">
+          <h4>Files And Recovery</h4>
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              checked={settings.reopenLastProject}
+              onChange={(e) => onChangeSettings({ reopenLastProject: e.target.checked })}
+            />
+            Reopen the last saved project on startup
+          </label>
+          <label className="settings-field">
+            <span>Auto-save interval</span>
+            <select value={autoSaveInterval} onChange={(e) => onChangeAutoSave(Number(e.target.value))}>
+              <option value={1}>Every 1 minute</option>
+              <option value={5}>Every 5 minutes</option>
+              <option value={10}>Every 10 minutes</option>
+            </select>
+          </label>
+        </section>
+
+        <section className="settings-section">
+          <h4>Exports</h4>
+          <div className="settings-folder-row">
+            <input
+              readOnly
+              value={settings.defaultOutputFolder}
+              placeholder="No default export folder selected"
+              title={settings.defaultOutputFolder || 'No default export folder selected'}
+            />
+            <button onClick={chooseOutputFolder} disabled={folderBusy || !desktopApi?.selectFolder}>
+              {folderBusy ? 'Choosing...' : 'Browse'}
+            </button>
+            {settings.defaultOutputFolder && (
+              <button onClick={() => onChangeSettings({ defaultOutputFolder: '' })} title="Use Save dialog instead">
+                Clear
+              </button>
+            )}
+          </div>
+          <p className="settings-help">HTML, MMP, and ZIP publish exports use this folder by default. Leave it blank to use a Save dialog.</p>
+        </section>
+
+        <section className="settings-section">
+          <h4>Feedback</h4>
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              checked={settings.showLongOperationOverlay}
+              onChange={(e) => onChangeSettings({ showLongOperationOverlay: e.target.checked })}
+            />
+            Show centered progress overlay for blocking long operations
+          </label>
+        </section>
+      </div>
+    </div>
+  )
+}
+
 // TextFormatBar — floating text-element formatting toolbar
 // ──────────────────────────────────────────────────────────────
 function TextFormatBar({ el, onChange }) {

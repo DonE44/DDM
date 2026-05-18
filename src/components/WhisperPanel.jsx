@@ -15,9 +15,21 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { WHISPER_MODELS, DEFAULT_WHISPER_MODEL, transcribe, abortTranscription, segmentsToSrt, segmentsToLyricLines, isWhisperAvailable } from '../utils/whisperUtils.js'
+import { WHISPER_MODELS, DEFAULT_WHISPER_MODEL, transcribe, abortTranscription, segmentsToSrt, segmentsToLyricLines, isWhisperAvailable, clearWhisperCache } from '../utils/whisperUtils.js'
 
 /** @typedef {{ start:number, end:number, text:string, durationMs:number }} LyricLine */
+
+function formatCacheBytes(bytes) {
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`
+}
 
 export default function WhisperPanel({
   /** URL of the audio file to transcribe (pre-filled if caller provides it) */
@@ -52,6 +64,8 @@ function ignoreError() {}
   const [customAudioUrl, setCustomAudioUrl] = useState(audioUrl)
   const [customAudioName, setCustomAudioName] = useState(audioName)
   const [customAudioFilePath, setCustomAudioFilePath] = useState(/** @type {string|null} */ (null))
+  const [modelCacheStatus, setModelCacheStatus] = useState(/** @type {{ state:string, message:string, dir?:string }} */ ({ state: 'unknown', message: 'Cache status not checked.' }))
+  const [modelCacheBusy, setModelCacheBusy] = useState(false)
   const fileInputRef = useRef(null)
 
   useEffect(() => {
@@ -61,6 +75,58 @@ function ignoreError() {}
   useEffect(() => {
     if (audioUrl) { setCustomAudioUrl(audioUrl); setCustomAudioName(audioName); setCustomAudioFilePath(null) }
   }, [audioUrl, audioName])
+
+  const refreshModelCacheStatus = useCallback(async () => {
+    const selectedModel = WHISPER_MODELS.find((m) => m.id === modelId)
+    if (modelId === 'openai-api') {
+      setModelCacheStatus({ state: 'cloud', message: 'OpenAI API uses a cloud model; no local Whisper cache is used.' })
+      return
+    }
+
+    if (typeof window === 'undefined' || !window.smmDesktop?.whisper?.modelStatus) {
+      setModelCacheStatus({ state: 'browser', message: 'Local cache controls are available in the Electron desktop app.' })
+      return
+    }
+
+    setModelCacheBusy(true)
+    try {
+      const info = await window.smmDesktop.whisper.modelStatus({ modelId })
+      const sizeText = selectedModel?.size ? ` (${selectedModel.size})` : ''
+      if (info?.allCached) {
+        const detailText = info.fileCount ? `, ${info.fileCount} files, ${formatCacheBytes(info.sizeBytes || 0)}` : ''
+        setModelCacheStatus({ state: 'ready', message: `Cached locally${sizeText}${detailText}.`, dir: info.dir })
+      } else {
+        setModelCacheStatus({ state: 'missing', message: `Not cached yet${sizeText}. First transcription will download it.`, dir: info?.dir })
+      }
+    } catch (err) {
+      setModelCacheStatus({ state: 'error', message: `Could not read model cache: ${err?.message || String(err)}` })
+    } finally {
+      setModelCacheBusy(false)
+    }
+  }, [modelId])
+
+  useEffect(() => {
+    if (!transcribing) refreshModelCacheStatus()
+  }, [modelId, transcribing, refreshModelCacheStatus])
+
+  const handleClearModelCache = useCallback(async () => {
+    if (modelId === 'openai-api' || modelCacheBusy || transcribing) return
+    const selectedModel = WHISPER_MODELS.find((m) => m.id === modelId)
+    const label = selectedModel?.label || modelId
+    if (!window.confirm(`Clear the cached files for ${label}? The original audio and projects will not be deleted.`)) return
+
+    setModelCacheBusy(true)
+    try {
+      const result = await clearWhisperCache(modelId)
+      if (!result?.ok) throw new Error(result?.error || 'Clear failed')
+      setModelCacheStatus({ state: 'missing', message: `Cleared ${label}. It will download again on next use.` })
+      await refreshModelCacheStatus()
+    } catch (err) {
+      setModelCacheStatus({ state: 'error', message: `Could not clear model cache: ${err?.message || String(err)}` })
+    } finally {
+      setModelCacheBusy(false)
+    }
+  }, [modelId, modelCacheBusy, transcribing, refreshModelCacheStatus])
 
   const handleTranscribe = useCallback(async () => {
     if (!customAudioUrl || transcribing) return
@@ -119,6 +185,7 @@ function ignoreError() {}
         const autoLines = segmentsToLyricLines(res.segments)
         if (autoLines.length > 0) onCreateLyricPages(autoLines)
       }
+      refreshModelCacheStatus()
     } catch (err) {
       if (err?.name === 'AbortError') {
         setStatus('Cancelled.')
@@ -130,7 +197,7 @@ function ignoreError() {}
     }
   // onTranscribeComplete and onCreateLyricPages are stable callback refs from parent —
   // including them avoids stale closure without causing unnecessary re-runs.
-  }, [customAudioUrl, customAudioFilePath, modelId, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey])
+  }, [customAudioUrl, customAudioFilePath, modelId, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey, refreshModelCacheStatus])
 
   const handleAbort = () => {
     abortTranscription()
@@ -249,7 +316,24 @@ function ignoreError() {}
             Use Tiny, Base, or Small for browser testing.
           </div>
         )}
-        <div style={S.muted}>First use downloads the model file. Cached permanently after that.</div>
+        <div style={S.cachePanel}>
+          <div style={{ ...S.muted, color: modelCacheStatus.state === 'ready' ? '#22c55e' : modelCacheStatus.state === 'error' ? '#ef4444' : 'var(--t3, #888)' }}>
+            Cache: {modelCacheStatus.message}
+          </div>
+          {modelCacheStatus.dir && (
+            <div title={modelCacheStatus.dir} style={S.cachePath}>{modelCacheStatus.dir}</div>
+          )}
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            <button type="button" onClick={refreshModelCacheStatus} disabled={modelCacheBusy || transcribing} style={S.secondaryBtn}>
+              {modelCacheBusy ? 'Checking...' : 'Refresh cache'}
+            </button>
+            {modelId !== 'openai-api' && (
+              <button type="button" onClick={handleClearModelCache} disabled={modelCacheBusy || transcribing || modelCacheStatus.state !== 'ready'} style={S.secondaryBtn}>
+                Clear selected model
+              </button>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* OpenAI API key input — shown only when openai-api model is selected */}
@@ -447,6 +531,15 @@ const S = {
   },
   progressBar: { height: 6, background: 'var(--bg3, #333)', borderRadius: 3, overflow: 'hidden' },
   progressFill: { height: '100%', background: 'var(--accent, #3cb8be)', transition: 'width 0.3s' },
+  cachePanel: {
+    display: 'flex', flexDirection: 'column', gap: 4,
+    border: '1px solid var(--border, #333)', borderRadius: 4, padding: 6,
+    background: 'rgba(255,255,255,0.03)',
+  },
+  cachePath: {
+    fontSize: 10, color: 'var(--t3, #888)', overflow: 'hidden',
+    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
   errorBox: {
     background: 'rgba(192,57,43,.15)', border: '1px solid rgba(192,57,43,.4)',
     borderRadius: 4, padding: '8px 10px', fontSize: 11, color: 'var(--t1, #eee)',

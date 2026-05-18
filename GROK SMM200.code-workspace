@@ -6,6 +6,25 @@
 	],
 	"settings": {
 		"github.copilot.chat.agent.autoFix": true,
-		"workbench.settings.alwaysShowAdvancedSettings": true
+		"workbench.settings.alwaysShowAdvancedSettings": true,
+		"terminal.integrated.defaultProfile.windows": "Windows PowerShell",
+		"terminal.integrated.automationProfile.windows": {
+			"path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+			"args": [
+				"-NoLogo"
+			]
+		},
+		"terminal.integrated.profiles.windows": {
+			"Windows PowerShell": {
+				"path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+				"args": [
+					"-NoLogo"
+				]
+			}
+		},
+		"terminal.integrated.env.windows": {
+			"PATH": "C:\\Program Files\\Git\\cmd;C:\\Program Files\\nodejs;${env:PATH}"
+		},
+		"powershell.powerShellDefaultVersion": "Windows PowerShell (x64)"
 	}
 }

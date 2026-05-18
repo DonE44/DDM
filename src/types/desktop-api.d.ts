@@ -443,6 +443,23 @@ interface WhisperResult {
   error?: string
 }
 
+/** Local Whisper model cache status */
+interface WhisperModelStatusResult {
+  allCached?: boolean
+  dir?: string
+  fileCount?: number
+  sizeBytes?: number
+  modelId?: string
+  error?: string
+}
+
+/** Result from clearing one local Whisper model cache */
+interface WhisperClearModelResult {
+  ok: boolean
+  dir?: string
+  error?: string
+}
+
 // ── smmDesktop API surface ───────────────────────────────────────────────────
 
 interface SmmDesktopApi {
@@ -524,8 +541,8 @@ interface SmmDesktopApi {
     transcribe(payload: unknown): Promise<WhisperResult>
     setHFToken(payload: unknown): Promise<unknown>
     cancel(): Promise<unknown>
-    modelStatus(payload: unknown): Promise<unknown>
-    clearModel(payload: unknown): Promise<unknown>
+    modelStatus(payload: { modelId: string }): Promise<WhisperModelStatusResult>
+    clearModel(payload: { modelId: string }): Promise<WhisperClearModelResult>
     onProgress(handler: (data: WhisperProgressEvent) => void): () => void
   }
   /** Piper TTS API (electron/piper-tts.cjs) */
@@ -599,4 +616,6 @@ export type {
   ListFolderResult,
   ListFolderFileEntry,
   WhisperResult,
+  WhisperModelStatusResult,
+  WhisperClearModelResult,
 }

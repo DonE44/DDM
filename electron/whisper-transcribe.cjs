@@ -123,6 +123,44 @@ function getCacheDir() {
   return path.join(app.getPath('userData'), 'whisper-models')
 }
 
+function getModelCacheDir(modelId) {
+  if (typeof modelId !== 'string' || !modelId.trim()) {
+    throw new Error('Invalid Whisper model id')
+  }
+  const cacheRoot = path.resolve(getCacheDir())
+  const safeName = modelId.replace(/[^A-Za-z0-9._-]+/g, '--')
+  const dir = path.resolve(cacheRoot, safeName)
+  const relative = path.relative(cacheRoot, dir)
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('Unsafe Whisper model cache path')
+  }
+  return dir
+}
+
+async function getFolderStats(dir) {
+  const stats = { fileCount: 0, sizeBytes: 0 }
+  async function walk(currentDir) {
+    let entries = []
+    try {
+      entries = await fsp.readdir(currentDir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    await Promise.all(entries.map(async (entry) => {
+      const entryPath = path.join(currentDir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(entryPath)
+      } else if (entry.isFile()) {
+        const fileStat = await fsp.stat(entryPath)
+        stats.fileCount += 1
+        stats.sizeBytes += fileStat.size
+      }
+    }))
+  }
+  await walk(dir)
+  return stats
+}
+
 // ── Pipeline singleton ────────────────────────────────────────────────────
 
 let _loadedPipeline = null
@@ -451,18 +489,19 @@ function registerWhisperTranscribeIPC() {
   })
 
   ipcMain.handle('whisper:model-status', async (_event, { modelId }) => {
-    const dir = path.join(getCacheDir(), modelId.replace(/\//g, '--'))
+    const dir = getModelCacheDir(modelId)
     const exists = fs.existsSync(dir)
-    return { allCached: exists, dir }
+    const folderStats = exists ? await getFolderStats(dir) : { fileCount: 0, sizeBytes: 0 }
+    return { allCached: exists, dir, ...folderStats }
   })
 
   ipcMain.handle('whisper:clear-model', async (_event, { modelId }) => {
     try {
-      const dir = path.join(getCacheDir(), modelId.replace(/\//g, '--'))
+      const dir = getModelCacheDir(modelId)
       await fsp.rm(dir, { recursive: true, force: true })
       _loadedPipeline = null
       _loadedModelId  = null
-      return { ok: true }
+      return { ok: true, dir }
     } catch (e) {
       return { ok: false, error: e.message }
     }

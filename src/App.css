@@ -2751,6 +2751,45 @@ html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; 
   margin-left: auto;
   color: var(--t2);
   font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-operation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  padding: 2px 7px;
+  border: 1px solid rgba(60,184,190,.35);
+  border-radius: 999px;
+  color: var(--t1);
+  background: rgba(60,184,190,.12);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.global-operation-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mme-teal);
+  box-shadow: 0 0 0 0 rgba(60,184,190,.6);
+  animation: global-operation-pulse 1.2s ease-out infinite;
+  flex: 0 0 auto;
+}
+
+.global-operation-progress {
+  color: var(--t3);
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+@keyframes global-operation-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(60,184,190,.55); }
+  70% { box-shadow: 0 0 0 6px rgba(60,184,190,0); }
+  100% { box-shadow: 0 0 0 0 rgba(60,184,190,0); }
 }
 
 @media (max-width: 1100px) {
@@ -5518,6 +5557,111 @@ kbd {
   border-radius: 4px;
   transition: width .25s ease;
   min-width: 4px;
+}
+
+.settings-dialog {
+  width: min(560px, 94vw);
+  max-height: 88vh;
+  overflow: auto;
+  padding: 18px;
+  color: var(--t1);
+}
+
+.settings-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(74,143,192,.24);
+}
+
+.settings-dialog-head h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.settings-dialog-head p,
+.settings-help {
+  margin: 4px 0 0;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-dialog-close {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--t2);
+  cursor: pointer;
+}
+
+.settings-section {
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(74,143,192,.16);
+}
+
+.settings-section:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.settings-section h4 {
+  margin: 0 0 10px;
+  color: var(--mme-teal);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.settings-check,
+.settings-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  color: var(--t2);
+  font-size: 13px;
+}
+
+.settings-field {
+  justify-content: space-between;
+}
+
+.settings-field select,
+.settings-folder-row input {
+  background: var(--bg3);
+  border: 1px solid rgba(74,143,192,.28);
+  border-radius: 6px;
+  color: var(--t1);
+  padding: 7px 9px;
+}
+
+.settings-folder-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-folder-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-folder-row button {
+  border: 1px solid rgba(74,143,192,.32);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--t2);
+  padding: 7px 11px;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 /* Password form */

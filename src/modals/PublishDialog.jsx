@@ -75,7 +75,7 @@ const PLATFORM_OPTS = [
   { id: 'navControls', label: '◀▶ Navigation Controls', desc: 'Show prev/next overlay buttons on hover.' },
 ]
 
-export default function PublishDialog({ pages, stage, projectVars, filename, presentationAudio, onClose, onStatus, onExportScript, onExportBook, onExportMp4 }) {
+export default function PublishDialog({ pages, stage, projectVars, filename, presentationAudio, defaultOutputFolder = '', onDefaultOutputFolderChange, onClose, onStatus, onExportScript, onExportBook, onExportMp4 }) {
   const defaultTitle = (filename || 'presentation').replace(/\.(mme|sca)$/i, '')
   const [tab, setTab] = useState('html')
   const [title, setTitle] = useState(defaultTitle)
@@ -91,14 +91,17 @@ export default function PublishDialog({ pages, stage, projectVars, filename, pre
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
-  const [outputFolder, setOutputFolder] = useState('')
+  const [outputFolder, setOutputFolder] = useState(defaultOutputFolder || '')
 
   const browseSaveFolder = useCallback(async () => {
     const desktop = typeof window !== 'undefined' ? window.smmDesktop : null
     if (!desktop?.selectFolder) return
     const result = await desktop.selectFolder()
-    if (!result.canceled && result.folderPath) setOutputFolder(result.folderPath)
-  }, [])
+    if (!result.canceled && result.folderPath) {
+      setOutputFolder(result.folderPath)
+      onDefaultOutputFolderChange?.(result.folderPath)
+    }
+  }, [onDefaultOutputFolderChange])
 
   const togglePage = useCallback((idx) => {
     setSelectedPages(prev => {
@@ -133,6 +136,7 @@ export default function PublishDialog({ pages, stage, projectVars, filename, pre
     setProgress('Building…')
     setErrorMsg('')
     try {
+      if (outputFolder) onDefaultOutputFolderChange?.(outputFolder)
       const opts = {
         title, author, description, password: password || '', kiosk, navControls, compressionLevel,
         outputFolder: outputFolder || null,
@@ -164,7 +168,7 @@ export default function PublishDialog({ pages, stage, projectVars, filename, pre
       setProgress('')
       setBusy(false)
     }
-  }, [tab, filteredPages, stage, projectVars, title, author, description, password, kiosk, navControls, compressionLevel, outputFolder, presentationAudio, onClose, onStatus, onExportScript, onExportBook, onExportMp4])
+  }, [tab, filteredPages, stage, projectVars, title, author, description, password, kiosk, navControls, compressionLevel, outputFolder, presentationAudio, onClose, onStatus, onExportScript, onExportBook, onExportMp4, onDefaultOutputFolderChange])
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -351,7 +355,10 @@ export default function PublishDialog({ pages, stage, projectVars, filename, pre
               {outputFolder && (
                 <button
                   style={{ ...btnStyle, background: '#2a1a1a', color: '#c04040', border: '1px solid #4a1a1a', padding: '7px 10px' }}
-                  onClick={() => setOutputFolder('')}
+                  onClick={() => {
+                    setOutputFolder('')
+                    onDefaultOutputFolderChange?.('')
+                  }}
                   disabled={busy}
                   title="Clear — use Save dialog instead"
                 >✕</button>

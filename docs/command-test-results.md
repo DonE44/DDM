@@ -122,6 +122,6 @@ Use this file to log command-by-command outcomes from docs/command-test-checklis
 - Date: 2026-05-01 (manual baseline) + 2026-05-18 (automated rerun)
 - Pass count: 30
 - Fail count: 1 (`file-export-storybook` — fixed)
-- Untested count: 45
+- Untested count: 52
 - Total commands: 83
-- Status: **PARTIAL (MANUAL) + CORE READY (AUTOMATED)** — 30/83 manually verified PASS; 53 commands still need manual testing; automated lint/build/audit/core validation rerun passed.
+- Status: **PARTIAL (MANUAL) + CORE READY (AUTOMATED)** — 30/83 manually verified PASS; 52 commands still need manual testing; automated lint/build/audit/core validation rerun passed.
