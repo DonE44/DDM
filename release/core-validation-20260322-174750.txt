@@ -1,0 +1,61 @@
+﻿
+  SMM200 Core Validation Report
+  Generated: 2026-03-22 17:47:50
+  Machine  : DONDELL
+  User     : base2jumpZAR
+========================================================================
+========================================================================
+  1. Core Project Files
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: scripts\prepare-desktop-build.ps1
+========================================================================
+  2. Lint
+========================================================================
+  [FAIL] ESLint failed (exit 1)
+  [INFO]   
+  [INFO]   > smm200@0.0.2 lint
+  [INFO]   > eslint .
+  [INFO]   
+  [INFO]   
+  [INFO]   C:\Users\base2jump\CODING FOR APPS\GROK SMM200\src\App.jsx
+  [INFO]     1033:12  error  'stepZoom' is defined but never used. Allowed unused vars must match /^[A-Z_]/u  no-unused-vars
+  [INFO]   
+  [INFO]   Ô£û 1 problem (1 error, 0 warnings)
+  [INFO]   
+========================================================================
+  3. Command Audit
+========================================================================
+  [PASS] Command audit passed
+========================================================================
+  4. Web Build
+========================================================================
+  [PASS] Vite build passed
+========================================================================
+  5. Desktop Unpacked Runtime
+========================================================================
+  [PASS] Unpacked executable available
+  [INFO] Path: C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMM200.exe
+========================================================================
+  6. Launch - Normal
+========================================================================
+  [INFO] normal attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Normal mode launched
+  [PASS] Normal mode stopped cleanly
+========================================================================
+  7. Launch - Kiosk
+========================================================================
+  [INFO] kiosk attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Kiosk mode launched
+  [PASS] Kiosk mode stopped cleanly
+========================================================================
+
+  SUMMARY: CORE ISSUES
+  Passed : 12 / 13
+  Failed : 1 / 13
+
+========================================================================
+

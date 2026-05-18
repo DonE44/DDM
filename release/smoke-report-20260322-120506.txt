@@ -1,0 +1,85 @@
+﻿
+  SMM200 Release Smoke Report
+  Generated: 2026-03-22 12:05:06
+  Machine  : DONDELL
+  User     : base2jumpZAR
+========================================================================
+========================================================================
+  1. Project File Checks
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: electron\media-capabilities.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: vite.config.js
+  [PASS] Exists: index.html
+========================================================================
+  2. Lint Check (eslint)
+========================================================================
+  [PASS] ESLint passed (exit 0)
+========================================================================
+  3. Web Build (vite build)
+========================================================================
+  [PASS] Vite build passed (exit 0)
+  [INFO] JS  asset: index-CBDs5jb7.js  (216.5 KB)
+  [INFO] CSS asset: index-BNaaBiaS.css (7.1 KB)
+========================================================================
+  4. Installer Artifact
+========================================================================
+  [PASS] Setup exe found: SMM200-Setup-0.0.0.exe
+  [INFO] Size : 92.15 MB
+  [INFO] SHA256: FC7AD8712129613698A982E0FB2834D80A7E04A9B689898DAD61243346664CF7
+  [PASS] Blockmap present
+========================================================================
+  5. Unpacked Runtime
+========================================================================
+  [PASS] Unpacked exe found: release\win-unpacked\SMM200.exe
+  [INFO] Size: 195.05 MB
+  [PASS] Runtime file: ffmpeg.dll
+  [PASS] Runtime file: libEGL.dll
+  [PASS] Runtime file: icudtl.dat
+  [PASS] Runtime file: resources.pak
+========================================================================
+  6. App Bundle (asar)
+========================================================================
+  [PASS] app.asar present (37.37 MB)
+========================================================================
+  7. Launch Test - Normal Mode
+========================================================================
+  [INFO] Process count after 8 s: 7
+  [PASS] App launched and running in normal mode
+  [FAIL] Processes still running after stop
+========================================================================
+  8. Launch Test - Kiosk Mode
+========================================================================
+  [INFO] Process count after 8 s: 10
+  [PASS] App launched and running in kiosk mode
+  [FAIL] Processes still running after kiosk stop
+========================================================================
+  9. Stage Preset Config (source check)
+========================================================================
+  [PASS] Stage preset 640 width defined
+  [PASS] Stage preset 800 width defined
+  [PASS] Stage preset 1024 width defined
+  [PASS] Stage preset 1280 width defined
+  [PASS] Stage preset 1920 width defined
+  [PASS] STAGE_PRESETS constant present
+  [PASS] stagePreset state present
+========================================================================
+  10. Electron Config Sanity
+========================================================================
+  [PASS] Kiosk mode flag present in main.cjs
+  [PASS] Media capabilities module imported
+  [PASS] media-capability IPC handler present
+  [PASS] set-kiosk-mode IPC handler present
+  [PASS] mediaCapability exposed in preload
+  [PASS] setKioskMode exposed in preload
+========================================================================
+
+  SUMMARY: ISSUES FOUND
+  Passed : 32 / 34
+  Failed : 2 / 34
+
+========================================================================
+

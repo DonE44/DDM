@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- FluxAura Studio favicon — matches app icon at 48×48 -->
+  <rect width="48" height="48" rx="9" fill="#090b0e"/>
+  <defs>
+    <radialGradient id="g" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#f5c842"/>
+      <stop offset="55%" stop-color="#e8a020"/>
+      <stop offset="100%" stop-color="#7a4500"/>
+    </radialGradient>
+    <linearGradient id="rb" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#1a60d0"/>
+      <stop offset="50%" stop-color="#5eb6ff"/>
+      <stop offset="100%" stop-color="#1a60d0"/>
+    </linearGradient>
+    <linearGradient id="rd" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2060b8" stop-opacity="0.65"/>
+      <stop offset="50%" stop-color="#4a9ef8" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#2060b8" stop-opacity="0.65"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#3b9eff" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#090b0e" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="24" cy="24" r="18" fill="url(#aura)"/>
+  <ellipse cx="24" cy="24" rx="19" ry="6.5" fill="none" stroke="url(#rd)" stroke-width="1.8" transform="rotate(-60 24 24)"/>
+  <ellipse cx="24" cy="24" rx="19" ry="6.5" fill="none" stroke="url(#rd)" stroke-width="1.8" transform="rotate(60 24 24)"/>
+  <ellipse cx="24" cy="24" rx="19" ry="6.5" fill="none" stroke="url(#rb)" stroke-width="2.5"/>
+  <circle cx="24" cy="5.5" r="3.5" fill="url(#g)"/>
+  <circle cx="5.5" cy="24" r="3.5" fill="url(#g)"/>
+  <circle cx="42.5" cy="24" r="3.5" fill="url(#g)"/>
+  <polygon points="20,19 20,29 30.5,24" fill="url(#g)"/>
+</svg>

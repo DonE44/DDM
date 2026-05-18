@@ -1,0 +1,54 @@
+﻿
+  SMME Core Validation Report
+  Generated: 2026-04-17 11:24:47
+  Machine  : DONDELL
+  User     : base2jumpZAR
+========================================================================
+========================================================================
+  1. Core Project Files
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: scripts\prepare-desktop-build.ps1
+========================================================================
+  2. Lint
+========================================================================
+  [PASS] ESLint passed
+========================================================================
+  3. Command Audit
+========================================================================
+  [PASS] Command audit passed
+========================================================================
+  4. Web Build
+========================================================================
+  [PASS] Vite build passed
+========================================================================
+  5. Desktop Unpacked Runtime
+========================================================================
+  [INFO] Unpacked app missing; running desktop:pack to produce runtime
+  [INFO] desktop:pack attempt 1 of 2
+  [PASS] desktop:pack passed on attempt 1
+  [PASS] Unpacked executable available
+  [INFO] Path: C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMME.exe
+========================================================================
+  6. Launch - Normal
+========================================================================
+  [INFO] normal attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Normal mode launched
+  [PASS] Normal mode stopped cleanly
+========================================================================
+  7. Launch - Kiosk
+========================================================================
+  [INFO] kiosk attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Kiosk mode launched
+  [PASS] Kiosk mode stopped cleanly
+========================================================================
+
+  SUMMARY: CORE READY
+  Passed : 14 / 14
+  Failed : 0 / 14
+
+========================================================================
+

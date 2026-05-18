@@ -1,0 +1,215 @@
+SMME Media Diagnostics
+Generated: 2026-04-11T09:44:31.159Z
+Stage preset: fhd_1920x1080
+Total pages: 61
+
+Backends:
+- ffmpeg-static: missing
+  detail: n/a
+- ffmpeg: missing
+  detail: n/a
+- timidity: missing
+  detail: n/a
+
+Recent media events:
+- none
+
+Page 1: Lyric 1
+- clip id=_34wpjv z=0 pos=(507,221) size=803x588
+  mediaName=file_example_MP4_1920_18MG.mp4
+  mediaExt=mp4
+  mediaKind=video
+  mediaSupport=native
+  mediaReason=Direct renderer support expected
+  mediaOutputHint=
+  mediaFile=data-url(23786482b)
+  mediaSourcePath=… MAP ELEMENTS\file_example_MP4_1920_18MG.mp4
+- clip id=_nzea4t z=1 pos=(226,292) size=283x444
+  mediaName=PixVerse_V6_Image_Text_540P_i_want_this_huntin.mp4
+  mediaExt=mp4
+  mediaKind=video
+  mediaSupport=native
+  mediaReason=Direct renderer support expected
+  mediaOutputHint=
+  mediaFile=data-url(1721302b)
+  mediaSourcePath=…se_V6_Image_Text_540P_i_want_this_huntin.mp4
+
+Page 2: Lyric 2
+- text id=_j76i8w z=0 pos=(40,490) size=1840x100
+
+Page 3: Lyric 3
+- text id=_3o8pfx z=0 pos=(40,490) size=1840x100
+
+Page 4: Lyric 4
+- text id=_9bso4y z=0 pos=(40,490) size=1840x100
+
+Page 5: Lyric 5
+- text id=_cmwdfj z=0 pos=(40,490) size=1840x100
+
+Page 6: Lyric 6
+- text id=_tdb141 z=0 pos=(40,490) size=1840x100
+
+Page 7: Lyric 7
+- text id=_tyonke z=0 pos=(40,490) size=1840x100
+
+Page 8: Lyric 8
+- text id=_ebn6cj z=0 pos=(40,490) size=1840x100
+
+Page 9: Lyric 9
+- text id=_f21703 z=0 pos=(40,490) size=1840x100
+
+Page 10: Lyric 10
+- text id=_fvplz5 z=0 pos=(40,490) size=1840x100
+
+Page 11: Lyric 11
+- text id=_wnum3y z=0 pos=(40,490) size=1840x100
+
+Page 12: Lyric 12
+- text id=_0x4usa z=0 pos=(40,490) size=1840x100
+
+Page 13: Lyric 13
+- text id=_u6l43b z=0 pos=(40,490) size=1840x100
+
+Page 14: Lyric 14
+- text id=_6hre5x z=0 pos=(40,490) size=1840x100
+
+Page 15: Lyric 15
+- text id=_63s4wi z=0 pos=(40,490) size=1840x100
+
+Page 16: Lyric 16
+- text id=_vfst42 z=0 pos=(40,490) size=1840x100
+
+Page 17: Lyric 17
+- text id=_29kksg z=0 pos=(40,490) size=1840x100
+
+Page 18: Lyric 18
+- text id=_kio600 z=0 pos=(40,490) size=1840x100
+
+Page 19: Lyric 19
+- text id=_a2ccsz z=0 pos=(40,490) size=1840x100
+
+Page 20: Lyric 20
+- text id=_h89k50 z=0 pos=(40,490) size=1840x100
+
+Page 21: Lyric 21
+- text id=_fww141 z=0 pos=(40,490) size=1840x100
+
+Page 22: Lyric 22
+- text id=_41ixv1 z=0 pos=(40,490) size=1840x100
+
+Page 23: Lyric 23
+- text id=_gs9qdh z=0 pos=(40,490) size=1840x100
+
+Page 24: Lyric 24
+- text id=_rtvrks z=0 pos=(40,490) size=1840x100
+
+Page 25: Lyric 25
+- text id=_uzqb83 z=0 pos=(40,490) size=1840x100
+
+Page 26: Lyric 26
+- text id=_jdtc7i z=0 pos=(40,490) size=1840x100
+
+Page 27: Lyric 27
+- text id=_b183g0 z=0 pos=(40,490) size=1840x100
+
+Page 28: Lyric 28
+- text id=_yb3e7l z=0 pos=(40,490) size=1840x100
+
+Page 29: Lyric 29
+- text id=_m7uwe2 z=0 pos=(40,490) size=1840x100
+
+Page 30: Lyric 30
+- text id=_8a9wk1 z=0 pos=(40,490) size=1840x100
+
+Page 31: Lyric 31
+- text id=_n1cw9m z=0 pos=(40,490) size=1840x100
+
+Page 32: Lyric 32
+- text id=_ts6f8o z=0 pos=(40,490) size=1840x100
+
+Page 33: Lyric 33
+- text id=_zkwb78 z=0 pos=(40,490) size=1840x100
+
+Page 34: Lyric 34
+- text id=_pc241o z=0 pos=(40,490) size=1840x100
+
+Page 35: Lyric 35
+- text id=_ed76jx z=0 pos=(40,490) size=1840x100
+
+Page 36: Lyric 36
+- text id=_14pf5s z=0 pos=(40,490) size=1840x100
+
+Page 37: Lyric 37
+- text id=_g9c8ek z=0 pos=(40,490) size=1840x100
+
+Page 38: Lyric 38
+- text id=_v9glqs z=0 pos=(40,490) size=1840x100
+
+Page 39: Lyric 39
+- text id=_7chq13 z=0 pos=(40,490) size=1840x100
+
+Page 40: Lyric 40
+- text id=_kxi12i z=0 pos=(40,490) size=1840x100
+
+Page 41: Lyric 41
+- text id=_t1xl5i z=0 pos=(40,490) size=1840x100
+
+Page 42: Lyric 42
+- text id=_ypmf32 z=0 pos=(40,490) size=1840x100
+
+Page 43: Lyric 43
+- text id=_1h8vxx z=0 pos=(40,490) size=1840x100
+
+Page 44: Lyric 44
+- text id=_bfxmwk z=0 pos=(40,490) size=1840x100
+
+Page 45: Lyric 45
+- text id=_3v8a9z z=0 pos=(40,490) size=1840x100
+
+Page 46: Lyric 46
+- text id=_z9apqx z=0 pos=(40,490) size=1840x100
+
+Page 47: Lyric 47
+- text id=_6kjysx z=0 pos=(40,490) size=1840x100
+
+Page 48: Lyric 48
+- text id=_g4g86q z=0 pos=(40,490) size=1840x100
+
+Page 49: Lyric 49
+- text id=_y2hkqz z=0 pos=(40,490) size=1840x100
+
+Page 50: Lyric 50
+- text id=_rojvrh z=0 pos=(40,490) size=1840x100
+
+Page 51: Lyric 51
+- text id=_6ime3n z=0 pos=(40,490) size=1840x100
+
+Page 52: Lyric 52
+- text id=_uxu4w0 z=0 pos=(40,490) size=1840x100
+
+Page 53: Lyric 53
+- text id=_nfhs9l z=0 pos=(40,490) size=1840x100
+
+Page 54: Lyric 54
+- text id=_k6lya1 z=0 pos=(40,490) size=1840x100
+
+Page 55: Lyric 55
+- text id=_0rsu96 z=0 pos=(40,490) size=1840x100
+
+Page 56: Lyric 56
+- text id=_fh9efp z=0 pos=(40,490) size=1840x100
+
+Page 57: Lyric 57
+- text id=_1m5jw6 z=0 pos=(40,490) size=1840x100
+
+Page 58: Lyric 58
+- text id=_f0c1lm z=0 pos=(40,490) size=1840x100
+
+Page 59: Lyric 59
+- text id=_mycyyg z=0 pos=(40,490) size=1840x100
+
+Page 60: Lyric 60
+- text id=_tebvo6 z=0 pos=(40,490) size=1840x100
+
+Page 61: Lyric 61
+- text id=_t320n3 z=0 pos=(40,490) size=1840x100

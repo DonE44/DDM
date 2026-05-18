@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- FluxAura Studio — Premium Cinematic icon: atom/orbital in electric blue + gold -->
+  <rect width="512" height="512" rx="96" fill="#090b0e"/>
+  <defs>
+    <!-- Gold gradient for orbs + play triangle -->
+    <radialGradient id="g" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#f5c842"/>
+      <stop offset="55%" stop-color="#e8a020"/>
+      <stop offset="100%" stop-color="#7a4500"/>
+    </radialGradient>
+    <!-- Primary ring: bright electric blue (horizontal) -->
+    <linearGradient id="rb" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#1a60d0"/>
+      <stop offset="50%" stop-color="#5eb6ff"/>
+      <stop offset="100%" stop-color="#1a60d0"/>
+    </linearGradient>
+    <!-- Secondary rings: dimmer electric blue (diagonal) -->
+    <linearGradient id="rd" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2060b8" stop-opacity="0.65"/>
+      <stop offset="50%" stop-color="#4a9ef8" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#2060b8" stop-opacity="0.65"/>
+    </linearGradient>
+    <!-- Aura glow behind orbital center -->
+    <radialGradient id="aura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#3b9eff" stop-opacity="0.18"/>
+      <stop offset="65%" stop-color="#1040b0" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#090b0e" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- Aura glow -->
+  <circle cx="256" cy="256" r="195" fill="url(#aura)"/>
+  <!-- Orbital rings: two diagonal (dimmer) + one horizontal (bright) -->
+  <ellipse cx="256" cy="256" rx="203" ry="70" fill="none" stroke="url(#rd)" stroke-width="19" transform="rotate(-60 256 256)"/>
+  <ellipse cx="256" cy="256" rx="203" ry="70" fill="none" stroke="url(#rd)" stroke-width="19" transform="rotate(60 256 256)"/>
+  <ellipse cx="256" cy="256" rx="203" ry="70" fill="none" stroke="url(#rb)" stroke-width="26"/>
+  <!-- Gold junction orbs -->
+  <circle cx="256" cy="59" r="34" fill="url(#g)"/>
+  <circle cx="59" cy="256" r="34" fill="url(#g)"/>
+  <circle cx="453" cy="256" r="34" fill="url(#g)"/>
+  <!-- Gold play triangle -->
+  <polygon points="214,203 214,309 326,256" fill="url(#g)"/>
+</svg>

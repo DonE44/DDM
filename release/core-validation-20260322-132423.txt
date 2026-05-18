@@ -1,0 +1,67 @@
+﻿
+  SMM200 Core Validation Report
+  Generated: 2026-03-22 13:24:23
+  Machine  : DONDELL
+  User     : base2jumpZAR
+========================================================================
+========================================================================
+  1. Core Project Files
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: scripts\prepare-desktop-build.ps1
+========================================================================
+  2. Lint
+========================================================================
+  [PASS] ESLint passed
+========================================================================
+  3. Web Build
+========================================================================
+  [PASS] Vite build passed
+========================================================================
+  4. Desktop Unpacked Runtime
+========================================================================
+  [INFO] Unpacked app missing; running desktop:pack to produce runtime
+  [INFO] desktop:pack attempt 1 of 2
+  [INFO] desktop:pack failed on attempt 1 (exit 1)
+  [INFO]   rendering chunks...
+  [INFO]   computing gzip size...
+  [INFO]   dist/index.html                   0.45 kB Ôöé gzip:  0.29 kB
+  [INFO]   dist/assets/index-BNaaBiaS.css    7.27 kB Ôöé gzip:  2.11 kB
+  [INFO]   dist/assets/index-CBDs5jb7.js   221.72 kB Ôöé gzip: 69.92 kB
+  [INFO]   
+  [INFO]   [32mÔ£ô built in 890ms[39m
+  [INFO]     ÔÇó electron-builder  version=26.8.1 os=10.0.19045
+  [INFO]     ÔÇó loaded configuration  file=package.json ("build" field)
+  [INFO]     ÔÇó executing @electron/rebuild  electronVersion=37.10.3 arch=x64 buildFromSource=false workspaceRoot=C:\Users\base2jump\CODING FOR APPS\GROK SMM200 projectDir=./ appDir=./
+  [INFO]     ÔÇó installing native dependencies  arch=x64
+  [INFO]     ÔÇó completed installing native dependencies
+  [INFO]     ÔÇó packaging       platform=win32 arch=x64 electron=37.10.3 appOutDir=release\win-unpacked
+  [INFO]     ÔÇó searching for node modules  pm=npm searchDir=C:\Users\base2jump\CODING FOR APPS\GROK SMM200
+  [INFO]     Ô¿» ENOENT: no such file or directory, rename 'C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\electron.exe' -> 'C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMM200.exe'  failedTask=build stackTrace=Error: ENOENT: no such file or directory, rename 'C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\electron.exe' -> 'C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMM200.exe'
+  [INFO] desktop:pack attempt 2 of 2
+  [PASS] desktop:pack passed on attempt 2
+  [PASS] Unpacked executable available
+  [INFO] Path: C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMM200.exe
+========================================================================
+  5. Launch - Normal
+========================================================================
+  [INFO] normal attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Normal mode launched
+  [PASS] Normal mode stopped cleanly
+========================================================================
+  6. Launch - Kiosk
+========================================================================
+  [INFO] kiosk attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Kiosk mode launched
+  [PASS] Kiosk mode stopped cleanly
+========================================================================
+
+  SUMMARY: CORE READY
+  Passed : 13 / 13
+  Failed : 0 / 13
+
+========================================================================
+

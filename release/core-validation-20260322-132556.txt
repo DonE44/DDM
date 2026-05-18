@@ -1,0 +1,50 @@
+﻿
+  SMM200 Core Validation Report
+  Generated: 2026-03-22 13:25:56
+  Machine  : DONDELL
+  User     : base2jumpZAR
+========================================================================
+========================================================================
+  1. Core Project Files
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: scripts\prepare-desktop-build.ps1
+========================================================================
+  2. Lint
+========================================================================
+  [PASS] ESLint passed
+========================================================================
+  3. Web Build
+========================================================================
+  [PASS] Vite build passed
+========================================================================
+  4. Desktop Unpacked Runtime
+========================================================================
+  [INFO] Unpacked app missing; running desktop:pack to produce runtime
+  [INFO] desktop:pack attempt 1 of 2
+  [PASS] desktop:pack passed on attempt 1
+  [PASS] Unpacked executable available
+  [INFO] Path: C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMM200.exe
+========================================================================
+  5. Launch - Normal
+========================================================================
+  [INFO] normal attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Normal mode launched
+  [PASS] Normal mode stopped cleanly
+========================================================================
+  6. Launch - Kiosk
+========================================================================
+  [INFO] kiosk attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Kiosk mode launched
+  [PASS] Kiosk mode stopped cleanly
+========================================================================
+
+  SUMMARY: CORE READY
+  Passed : 13 / 13
+  Failed : 0 / 13
+
+========================================================================
+

@@ -1,0 +1,74 @@
+COMMAND_AUDIT_TIMESTAMP=20260322-163333
+APP_FILE=src/App.jsx
+RESULTS_FILE=docs/command-test-results.md
+TOTAL_COMMANDS=31
+MISSING_HANDLERS=1
+MISSING_WIRING=29
+AUDIT_STATUS=FAIL
+
+MISSING_HANDLER_COMMANDS:
+- ---
+
+MISSING_WIRING_COMMANDS:
+- ---
+- file-new
+- file-open
+- file-save
+- file-export-html
+- page-new
+- page-duplicate
+- page-delete
+- page-prev
+- page-next
+- selection-duplicate
+- selection-delete
+- layer-front
+- layer-up
+- layer-down
+- layer-back
+- view-script
+- view-script-close
+- view-close-overlays
+- view-grid-toggle
+- view-bg-image
+- play-start
+- play-stop
+- play-prev
+- play-next
+- tool-select
+- tool-text
+- tool-image
+- tool-button
+
+ALL_COMMANDS:
+- ---
+- file-new
+- file-open
+- file-save
+- file-export-html
+- page-new
+- page-duplicate
+- page-delete
+- page-prev
+- page-next
+- selection-duplicate
+- selection-delete
+- layer-front
+- layer-up
+- layer-down
+- layer-back
+- view-script
+- view-script-close
+- view-close-overlays
+- view-grid-toggle
+- view-zoom-in
+- view-zoom-out
+- view-bg-image
+- play-start
+- play-stop
+- play-prev
+- play-next
+- tool-select
+- tool-text
+- tool-image
+- tool-button

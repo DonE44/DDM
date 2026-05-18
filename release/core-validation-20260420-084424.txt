@@ -1,0 +1,67 @@
+﻿
+  SMME Core Validation Report
+  Generated: 2026-04-20 08:44:24
+  Machine  : DONDELL
+  User     : base2jumpZAR
+========================================================================
+========================================================================
+  1. Core Project Files
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: scripts\prepare-desktop-build.ps1
+========================================================================
+  2. Lint
+========================================================================
+  [FAIL] ESLint failed (exit 1)
+  [INFO]   
+  [INFO]   > smme@0.1.0 lint
+  [INFO]   > eslint . --max-warnings 0
+  [INFO]   
+  [INFO]   
+  [INFO]   C:\Users\base2jump\CODING FOR APPS\GROK SMM200\src\components\HFTokenSettings.jsx
+  [INFO]     28:6  warning  React Hook useEffect has missing dependencies: 'checkTokenStatus' and 'isElectron'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+  [INFO]   
+  [INFO]   C:\Users\base2jump\CODING FOR APPS\GROK SMM200\src\utils\lyricAlignUtils.js
+  [INFO]     21:10  error  'matchScore' is defined but never used. Allowed unused vars must match /^[A-Z_]/u  no-unused-vars
+  [INFO]   
+  [INFO]   Ô£û 2 problems (1 error, 1 warning)
+  [INFO]   
+========================================================================
+  3. Command Audit
+========================================================================
+  [PASS] Command audit passed
+========================================================================
+  4. Web Build
+========================================================================
+  [PASS] Vite build passed
+========================================================================
+  5. Desktop Unpacked Runtime
+========================================================================
+  [PASS] Unpacked executable available
+  [INFO] Path: C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMME.exe
+========================================================================
+  6. Launch - Normal
+========================================================================
+  [INFO] normal attempt 1: aliveByPid=False aliveByName=False
+  [INFO] normal attempt 2: aliveByPid=False aliveByName=False
+  [INFO] normal attempt 3: aliveByPid=False aliveByName=False
+  [FAIL] Normal mode failed to launch after retries
+  [PASS] Normal mode stopped cleanly
+========================================================================
+  7. Launch - Kiosk
+========================================================================
+  [INFO] kiosk attempt 1: aliveByPid=False aliveByName=False
+  [INFO] kiosk attempt 2: aliveByPid=False aliveByName=False
+  [FAIL] Kiosk mode failed to launch after retries
+  [PASS] Kiosk mode stopped cleanly
+========================================================================
+
+  SUMMARY: CORE ISSUES
+  Passed : 10 / 13
+  Failed : 3 / 13
+
+========================================================================
+

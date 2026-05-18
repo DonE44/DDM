@@ -1,0 +1,27 @@
+directories:
+  output: release
+  buildResources: build
+appId: com.smm200.app
+productName: SMME
+afterPack: ./scripts/afterPack.cjs
+asarUnpack:
+  - node_modules/ffmpeg-static/**/*
+files:
+  - filter:
+      - dist/**/*
+      - electron/**/*
+      - package.json
+win:
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+electronVersion: 41.1.1

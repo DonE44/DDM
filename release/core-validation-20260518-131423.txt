@@ -1,0 +1,55 @@
+﻿
+  SMME Core Validation Report
+  Generated: 2026-05-18 13:14:23
+  Machine  : DESKTOP-NBIA47V
+  User     : Don E
+========================================================================
+========================================================================
+  1. Core Project Files
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: scripts\prepare-desktop-build.ps1
+========================================================================
+  2. Lint
+========================================================================
+  [PASS] ESLint passed
+========================================================================
+  3. Command Audit
+========================================================================
+  [PASS] Command audit passed
+========================================================================
+  4. Web Build
+========================================================================
+  [FAIL] Vite build failed (exit -1073741795)
+  [INFO]   
+  [INFO]   > fluxaura-studio@0.1.0 build
+  [INFO]   > vite build
+  [INFO]   
+========================================================================
+  5. Desktop Unpacked Runtime
+========================================================================
+  [PASS] Unpacked executable available
+  [INFO] Path: C:\Users\Don E\Desktop\GROK SMM200\release\win-unpacked\SMME.exe
+========================================================================
+  6. Launch - Normal
+========================================================================
+  [INFO] normal attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Normal mode launched
+  [PASS] Normal mode stopped cleanly
+========================================================================
+  7. Launch - Kiosk
+========================================================================
+  [INFO] kiosk attempt 1: aliveByPid=True aliveByName=True
+  [PASS] Kiosk mode launched
+  [PASS] Kiosk mode stopped cleanly
+========================================================================
+
+  SUMMARY: CORE ISSUES
+  Passed : 12 / 13
+  Failed : 1 / 13
+
+========================================================================
+

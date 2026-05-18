@@ -1,0 +1,47 @@
+﻿
+  SMM200 Core Validation Report
+  Generated: 2026-03-22 12:58:13
+  Machine  : DONDELL
+  User     : base2jumpZAR
+========================================================================
+========================================================================
+  1. Core Project Files
+========================================================================
+  [PASS] Exists: package.json
+  [PASS] Exists: electron\main.cjs
+  [PASS] Exists: electron\preload.cjs
+  [PASS] Exists: src\App.jsx
+  [PASS] Exists: scripts\prepare-desktop-build.ps1
+========================================================================
+  2. Lint
+========================================================================
+  [PASS] ESLint passed
+========================================================================
+  3. Web Build
+========================================================================
+  [PASS] Vite build passed
+========================================================================
+  4. Desktop Unpacked Runtime
+========================================================================
+  [PASS] Unpacked executable available
+  [INFO] Path: C:\Users\base2jump\CODING FOR APPS\GROK SMM200\release\win-unpacked\SMM200.exe
+========================================================================
+  5. Launch - Normal
+========================================================================
+  [INFO] Process count after launch: 0
+  [FAIL] Normal mode failed to launch
+  [PASS] Normal mode stopped cleanly
+========================================================================
+  6. Launch - Kiosk
+========================================================================
+  [INFO] Process count after kiosk launch: 4
+  [PASS] Kiosk mode launched
+  [PASS] Kiosk mode stopped cleanly
+========================================================================
+
+  SUMMARY: CORE ISSUES
+  Passed : 11 / 12
+  Failed : 1 / 12
+
+========================================================================
+
