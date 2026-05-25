@@ -7,12 +7,9 @@
 	"settings": {
 		"github.copilot.chat.agent.autoFix": true,
 		"workbench.settings.alwaysShowAdvancedSettings": true,
-		"terminal.integrated.defaultProfile.windows": "Windows PowerShell",
+		"terminal.integrated.defaultProfile.windows": "Command Prompt",
 		"terminal.integrated.automationProfile.windows": {
-			"path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-			"args": [
-				"-NoLogo"
-			]
+			"path": "${env:windir}\\System32\\cmd.exe"
 		},
 		"terminal.integrated.profiles.windows": {
 			"Windows PowerShell": {
@@ -20,6 +17,9 @@
 				"args": [
 					"-NoLogo"
 				]
+			},
+			"Command Prompt": {
+				"path": "${env:windir}\\System32\\cmd.exe"
 			}
 		},
 		"terminal.integrated.env.windows": {

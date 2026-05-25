@@ -8,6 +8,14 @@
  *
  * Frames are streamed to the main process in batches of 50 to avoid large IPC payloads.
  * Audio is automatically sourced from the presentation audio track.
+ *
+ * @param {{
+ *   pages: import('../types/desktop-api').SmmPage[],
+ *   stageWidth: number,
+ *   stageHeight: number,
+ *   presentationAudio?: { file?: string, sourcePath?: string, name?: string } | null,
+ *   onClose: () => void,
+ * }} props
  */
 
 import React, { useState, useCallback, useEffect, useRef } from 'react'

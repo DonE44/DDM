@@ -1,8 +1,10 @@
 directories:
   output: release
   buildResources: build
-appId: com.smm200.app
-productName: SMME
+appId: com.fluxaurastudio.app
+productName: FluxAura Studio
+npmRebuild: false
+icon: resources/icon.png
 afterPack: ./scripts/afterPack.cjs
 asarUnpack:
   - node_modules/ffmpeg-static/**/*
@@ -24,4 +26,22 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  artifactName: ${productName}-${version}.${ext}
+  hardenedRuntime: false
+  gatekeeperAssess: false
+dmg:
+  contents:
+    - x: 130
+      'y': 220
+    - x: 410
+      'y': 220
+      type: link
+      path: /Applications
 electronVersion: 41.1.1

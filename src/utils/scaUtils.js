@@ -7,9 +7,9 @@ import { detectMediaKind, isUnresolvedMediaPath, isTempUrl, inferMediaCapability
 import { getRecentColors, getSavedColors, getSavedPalettes, setRecentColors, setSavedColors, setSavedPalettes } from './colorUtils.js'
 
 /**
- * Parse SCA script text into pages and stage dimensions.
- * @param {string} text - Raw SCA file content
- * @returns {{ pages: import('../types/desktop-api').SmmPage[], stage: import('../types/desktop-api').SmmStage | null, presentationAudio: object|null, projectVars: unknown[]|null }}
+ * Parse MME project script text into pages and stage dimensions.
+ * @param {string} text - Raw MME file content
+ * @returns {{ pages: import('../types/desktop-api').SmmPage[], stage: import('../types/desktop-api').SmmStage | null, presentationAudio: object|null, projectVars: unknown[]|null, pronunciationRules: string, warnings: string[] }}
  */
 export function parseMME(text) {
   const pages = []
@@ -17,7 +17,7 @@ export function parseMME(text) {
   let page = null
   let stageWidth = SW
   let stageHeight = SH
-  const result = { pages, stage: null, presentationAudio: null, projectVars: null }
+  const result = { pages, stage: null, presentationAudio: null, projectVars: null, pronunciationRules: '', warnings: [] }
 
   for (const raw of lines) {
     const line = raw.trim()
@@ -28,13 +28,19 @@ export function parseMME(text) {
       // mme:presaudio — project-level persistent audio track
       const smmPresAudio = line.match(/^\/\/ mme:presaudio (.+)$/)
       if (smmPresAudio) {
-        try { result.presentationAudio = JSON.parse(smmPresAudio[1]) } catch { /* noop */ }
+        try { result.presentationAudio = JSON.parse(smmPresAudio[1]) } catch (err) { result.warnings.push(`Ignored invalid mme:presaudio metadata: ${String(err?.message || err)}`) }
         continue
       }
       // mme:projectvars — project-level variables array
       const smmProjVars = line.match(/^\/\/ mme:projectvars (.+)$/)
       if (smmProjVars) {
-        try { result.projectVars = JSON.parse(smmProjVars[1]) } catch { /* noop */ }
+        try { result.projectVars = JSON.parse(smmProjVars[1]) } catch (err) { result.warnings.push(`Ignored invalid mme:projectvars metadata: ${String(err?.message || err)}`) }
+        continue
+      }
+      // mme:pronunciation — project-level spoken-only replacement rules
+      const smmPronunciation = line.match(/^\/\/ mme:pronunciation (.+)$/)
+      if (smmPronunciation) {
+        try { result.pronunciationRules = String(JSON.parse(smmPronunciation[1]) || '') } catch (err) { result.warnings.push(`Ignored invalid mme:pronunciation metadata: ${String(err?.message || err)}`) }
         continue
       }
       // mme:colors — project-level color palette snapshot; restore to localStorage
@@ -45,13 +51,13 @@ export function parseMME(text) {
           if (Array.isArray(col.recent) && col.recent.length) setRecentColors(col.recent)
           if (Array.isArray(col.saved) && col.saved.length) setSavedColors(col.saved)
           if (Array.isArray(col.palettes) && col.palettes.length) setSavedPalettes(col.palettes)
-        } catch { /* noop */ }
+        } catch (err) { result.warnings.push(`Ignored invalid mme:colors metadata: ${String(err?.message || err)}`) }
         continue
       }
       // mme:page applies to the page object (no element needed)
       const smmPage = line.match(/^\/\/ mme:page (.+)$/)
       if (smmPage && page) {
-        try { Object.assign(page.timing, JSON.parse(smmPage[1])) } catch { /* noop */ }
+        try { Object.assign(page.timing, JSON.parse(smmPage[1])) } catch (err) { result.warnings.push(`Ignored invalid mme:page metadata: ${String(err?.message || err)}`) }
         continue
       }
       // mme:pgext applies page-level extra properties (wipeOut, bgColor, bgGradient, sound, etc.)
@@ -76,7 +82,7 @@ export function parseMME(text) {
             delete ext.bgMedia
           }
           Object.assign(page, ext)
-        } catch { /* noop */ }
+        } catch (err) { result.warnings.push(`Ignored invalid mme:pgext metadata: ${String(err?.message || err)}`) }
         continue
       }
       // mme:script — page-level visual script blocks (onStartScript / onEndScript)
@@ -86,7 +92,8 @@ export function parseMME(text) {
           const s = JSON.parse(smmScript[1])
           if (Array.isArray(s.onStartScript)) page.onStartScript = s.onStartScript
           if (Array.isArray(s.onEndScript)) page.onEndScript = s.onEndScript
-        } catch { /* noop */ }
+          if (Array.isArray(s.keyBindings)) page.keyBindings = s.keyBindings
+        } catch (err) { result.warnings.push(`Ignored invalid mme:script metadata: ${String(err?.message || err)}`) }
         continue
       }
       // mme:hotspot — standalone self-contained hotspot element (no preceding command line needed)
@@ -98,7 +105,7 @@ export function parseMME(text) {
           Object.assign(el, meta)
           el.z = meta.z ?? page.elements.length
           page.elements.push(el)
-        } catch { /* noop */ }
+        } catch (err) { result.warnings.push(`Ignored invalid mme:hotspot metadata: ${String(err?.message || err)}`) }
         continue
       }
       // mme:menubar — standalone self-contained menubar element
@@ -112,14 +119,14 @@ export function parseMME(text) {
           if (meta.style) el.style = meta.style
           if (meta.items) el.items = meta.items
           page.elements.push(el)
-        } catch { /* noop */ }
+        } catch (err) { result.warnings.push(`Ignored invalid mme:menubar metadata: ${String(err?.message || err)}`) }
         continue
       }
       if (!page || !page.elements.length) continue
       const last = page.elements[page.elements.length - 1]
       const smmTxt = line.match(/^\/\/ mme:txt (.+)$/)
       if (smmTxt && last.type === 'text') {
-        try { Object.assign(last, JSON.parse(smmTxt[1])) } catch { /* noop */ }
+        try { Object.assign(last, JSON.parse(smmTxt[1])) } catch (err) { result.warnings.push(`Ignored invalid mme:txt metadata: ${String(err?.message || err)}`) }
         continue
       }
       const smmBtn = line.match(/^\/\/ mme:btn (.+)$/)
@@ -131,7 +138,7 @@ export function parseMME(text) {
           if (!meta.hoverBtnImage && meta.hoverBtnImageSrc) meta.hoverBtnImage = meta.hoverBtnImageSrc
           if (!meta.pressedBtnImage && meta.pressedBtnImageSrc) meta.pressedBtnImage = meta.pressedBtnImageSrc
           Object.assign(last, meta)
-        } catch { /* noop */ }
+        } catch (err) { result.warnings.push(`Ignored invalid mme:btn metadata: ${String(err?.message || err)}`) }
         continue
       }
       const smmClip = line.match(/^\/\/ mme:clip (.+)$/)
@@ -142,6 +149,9 @@ export function parseMME(text) {
           if (meta.dataUrl) {
             last.file = meta.dataUrl
             delete meta.dataUrl
+          }
+          if (!last.mediaSourcePath && meta.file && isUnresolvedMediaPath(meta.file)) {
+            last.mediaSourcePath = meta.file
           }
           // Don't let empty-string media fields overwrite correctly-inferred non-empty values
           ;['mediaExt', 'mediaSupport', 'mediaReason', 'mediaOutputHint'].forEach((k) => {
@@ -157,7 +167,7 @@ export function parseMME(text) {
               last.mediaReason = fresh.reason || ''
             }
           }
-        } catch { /* noop */ }
+        } catch (err) { result.warnings.push(`Ignored invalid mme:clip metadata: ${String(err?.message || err)}`) }
         continue
       }
       const smmMpeg = line.match(/^\/\/ mme:mpeg (.+)$/)
@@ -167,6 +177,9 @@ export function parseMME(text) {
           if (meta.dataUrl) {
             last.file = meta.dataUrl
             delete meta.dataUrl
+          }
+          if (!last.mediaSourcePath && meta.file && isUnresolvedMediaPath(meta.file)) {
+            last.mediaSourcePath = meta.file
           }
           ;['mediaExt', 'mediaSupport', 'mediaReason', 'mediaOutputHint'].forEach((k) => {
             if (meta[k] === '' || meta[k] == null) delete meta[k]
@@ -181,7 +194,7 @@ export function parseMME(text) {
               last.mediaReason = fresh.reason || ''
             }
           }
-        } catch { /* noop */ }
+        } catch (err) { result.warnings.push(`Ignored invalid mme:mpeg metadata: ${String(err?.message || err)}`) }
         continue
       }
       continue
@@ -453,10 +466,10 @@ export function buildInteractionMeta(el) {
 }
 
 /**
- * Serialise all pages and stage config to SCA script text.
+ * Serialise all pages and stage config to MME project script text.
  * @param {import('../types/desktop-api').SmmPage[]} pages
  * @param {import('../types/desktop-api').SmmStage} stage
- * @returns {string} SCA script text ready to write to disk
+ * @returns {string} MME project script text ready to write to disk
  */
 export function genMME(pages, stage, projectMeta = {}) {
   const stageWidth = stage?.width || SW
@@ -478,6 +491,9 @@ export function genMME(pages, stage, projectMeta = {}) {
   if (Array.isArray(pv) && pv.length) {
     out += `// mme:projectvars ${JSON.stringify(pv)}\n`
   }
+  if (projectMeta.pronunciationRules) {
+    out += `// mme:pronunciation ${JSON.stringify(String(projectMeta.pronunciationRules || ''))}\n`
+  }
   out += '\n'
   out += 'EVENT\n  Group:\n    Config.SaveOpts();\n  Sequence:\n'
 
@@ -494,13 +510,15 @@ export function genMME(pages, stage, projectMeta = {}) {
     }
 
     if (pg.timing.mode === 'wait') out += '        Wait();\n'
-    if (pg.timing.mode === 'pause') out += `        Pause(${pg.timing.duration || 5});\n`
+    if (pg.timing.mode === 'pause') out += `        Pause(${pg.timing.duration || ((pg.timing.durationMs || 0) / 1000) || 5});\n`
 
     // Write ALL timing metadata as mme:page comment — always written so every mode
     // (including 'none', 'loop', 'wait-input-goto') round-trips correctly.
     const timingMeta = {}
     timingMeta.mode = pg.timing.mode || 'wait'
     if (pg.timing.duration) timingMeta.duration = pg.timing.duration
+    if (pg.timing.durationMs) timingMeta.durationMs = pg.timing.durationMs
+    if (pg.timing.ms) timingMeta.ms = pg.timing.ms
     if (pg.timing.waitInputTrigger) timingMeta.waitInputTrigger = pg.timing.waitInputTrigger
     if (pg.timing.waitInputKey) timingMeta.waitInputKey = pg.timing.waitInputKey
     if (pg.timing.waitInputGoto) timingMeta.waitInputGoto = pg.timing.waitInputGoto
@@ -543,6 +561,11 @@ export function genMME(pages, stage, projectMeta = {}) {
         if (el.audioEvent) { meta.audioEvent = el.audioEvent; meta.audioEventName = el.audioEventName || '' }
         if (el.afterPlay && el.afterPlay !== 'none') { meta.afterPlay = el.afterPlay; meta.afterPlayTarget = el.afterPlayTarget || '' }
         if (el.id) meta.id = el.id
+        if (el.autoFitText) meta.autoFitText = true
+        if (el.pronunciationRules) meta.pronunciationRules = el.pronunciationRules
+        if (el.ttsVoiceId) meta.ttsVoiceId = el.ttsVoiceId
+        if (el.ttsVoiceLabel) meta.ttsVoiceLabel = el.ttsVoiceLabel
+        if (el.ttsRate != null && Number(el.ttsRate) !== 1) meta.ttsRate = Number(el.ttsRate) || 1
         Object.assign(meta, buildInteractionMeta(el))
         // ── Animation (fly-in / fly-out) ──
         if (el.animIn && el.animIn !== 'none') {
@@ -606,12 +629,47 @@ export function genMME(pages, stage, projectMeta = {}) {
         if (el.fit) clipMeta.fit = el.fit
         if (el.mediaSourcePath) clipMeta.mediaSourcePath = el.mediaSourcePath
         if (el.chromaKey) clipMeta.chromaKey = el.chromaKey
+        if (el.chromaColor) clipMeta.chromaColor = el.chromaColor
+        if (el.chromaTolerance != null) clipMeta.chromaTolerance = el.chromaTolerance
+        if (el.chromaSoftness != null) clipMeta.chromaSoftness = el.chromaSoftness
+        if (el.chromaMaskShape) clipMeta.chromaMaskShape = el.chromaMaskShape
+        if (Array.isArray(el.chromaSelections) && el.chromaSelections.length) clipMeta.chromaSelections = el.chromaSelections
         if (el.chromaOrigFile) {
           const origF = String(externUrl(el.chromaOrigFile))
           if (origF.startsWith('data:') && origF.length < 8388608) clipMeta.chromaOrigDataUrl = origF
         }
         if (el.elLabel) clipMeta.elLabel = el.elLabel
+        if (el.visible === false) clipMeta.visible = false
+        if (el.locked) clipMeta.locked = true
+        if (el.audioHidden) clipMeta.audioHidden = true
+        if (el.showMediaControls === false) clipMeta.showMediaControls = false
+        if (el.autoPlay === false) clipMeta.autoPlay = false
+        if (el.unmuted) clipMeta.unmuted = true
+        if (el.mediaMuted) clipMeta.mediaMuted = true
+        if (el.replaceAudio) clipMeta.replaceAudio = true
+        if (el.showMediaControls === false) clipMeta.showMediaControls = false
+        const pageAudioLane = Number(el.pageAudioLane)
+        if (pageAudioLane === 1 || pageAudioLane === 2) {
+          clipMeta.pageAudioLane = pageAudioLane
+        }
+        if (el.pageAudioRole) clipMeta.pageAudioRole = el.pageAudioRole
+        if (el.isPageBackgroundSound) clipMeta.isPageBackgroundSound = true
+        if (el.pageAudioOffset != null) clipMeta.pageAudioOffset = Number(el.pageAudioOffset) || 0
+        if (el.isNarrationClip) clipMeta.isNarrationClip = true
+        if (el.sourceTextElementId) clipMeta.sourceTextElementId = el.sourceTextElementId
+        if (el.textPreview) clipMeta.textPreview = el.textPreview
+        if (Array.isArray(el.wordTimestamps) && el.wordTimestamps.length) {
+          clipMeta.wordTimestamps = el.wordTimestamps.map((w) => ({
+            start: Number(w?.start) || 0,
+            end: Number(w?.end) || 0,
+            text: String(w?.text ?? w?.word ?? ''),
+          }))
+        }
+        if (el.ttsVoiceId) clipMeta.ttsVoiceId = el.ttsVoiceId
+        if (el.ttsVoiceLabel) clipMeta.ttsVoiceLabel = el.ttsVoiceLabel
+        if (el.ttsRate != null && Number(el.ttsRate) !== 1) clipMeta.ttsRate = Number(el.ttsRate) || 1
         if (el.loop) clipMeta.loop = el.loop
+        if (el.volume != null && Number(el.volume) !== 1) clipMeta.volume = Number(el.volume) || 0
         if (el.onPlayMode && el.onPlayMode !== 'auto') clipMeta.onPlayMode = el.onPlayMode
         if (el.afterPlay && el.afterPlay !== 'none') { clipMeta.afterPlay = el.afterPlay; clipMeta.afterPlayTarget = el.afterPlayTarget || '' }
         if (el.audioEvent) { clipMeta.audioEvent = el.audioEvent; clipMeta.audioEventName = el.audioEventName || '' }
@@ -645,6 +703,11 @@ export function genMME(pages, stage, projectMeta = {}) {
           if (el.animOutDelay) meta.animOutDelay = el.animOutDelay
         }
         // ── Playback timing ──
+        if (el.unmuted) meta.unmuted = true
+        if (el.mediaMuted) meta.mediaMuted = true
+        if (el.replaceAudio) meta.replaceAudio = true
+        if (el.showMediaControls === false) meta.showMediaControls = false
+        if (el.autoPlay === false) meta.autoPlay = false
         if (el.onPlayDelay) meta.onPlayDelay = el.onPlayDelay
         if (el.playCount && el.playCount !== 1) meta.playCount = el.playCount
         if (el.wipeDir) meta.wipeDir = el.wipeDir
@@ -711,6 +774,7 @@ export function genMME(pages, stage, projectMeta = {}) {
           mediaFile: el.mediaFile || '',
           mediaFileName: el.mediaFileName || '',
           scriptContent: el.scriptContent || '',
+          ...(Array.isArray(el.script) && el.script.length ? { script: el.script } : {}),
           gotoType: el.gotoType || 'page',
           gotoPageName: el.gotoPageName || '',
           audioEvent: el.audioEvent || '',
@@ -858,7 +922,7 @@ export function genMME(pages, stage, projectMeta = {}) {
       }
 
       if (el.type === 'hotspot') {
-        const hotMeta = {
+        const hotMeta = /** @type {Record<string, unknown>} */ ({
           id: el.id,
           x: Math.round(el.x), y: Math.round(el.y), w: Math.round(el.w), h: Math.round(el.h), z: el.z || 0,
           hotspotShape: el.hotspotShape || 'rect',
@@ -883,7 +947,8 @@ export function genMME(pages, stage, projectMeta = {}) {
           gotoObjectId: el.gotoObjectId || '',
           gotoObjectLabel: el.gotoObjectLabel || '',
           scriptContent: el.scriptContent || '',
-        }
+          ...(Array.isArray(el.script) && el.script.length ? { script: el.script } : {}),
+        })
         // Preserve animation fields if set
         if (el.animIn && el.animIn !== 'none') { hotMeta.animIn = el.animIn; hotMeta.animInDuration = el.animInDuration ?? 600; hotMeta.animInDelay = el.animInDelay ?? 0; if (el.animInEasing && el.animInEasing !== 'ease-out') hotMeta.animInEasing = el.animInEasing }
         if (el.animOut && el.animOut !== 'none') { hotMeta.animOut = el.animOut; hotMeta.animOutDuration = el.animOutDuration ?? 600; hotMeta.animOutTrigger = el.animOutTrigger || 'never'; if (el.animOutDelay) hotMeta.animOutDelay = el.animOutDelay }
@@ -960,29 +1025,56 @@ export function genMME(pages, stage, projectMeta = {}) {
     if (pg.lyricStart != null) pgExtMeta.lyricStart = pg.lyricStart
     if (pg.lyricEnd != null) pgExtMeta.lyricEnd = pg.lyricEnd
     if (pg.wordTimestamps?.length) pgExtMeta.wordTimestamps = pg.wordTimestamps
-    // Save narration: store sourcePath (native FS path) so it survives session restart.
-    // Never save the ephemeral HTTP media server URL (isTempUrl returns true for those).
-    // For TTS synthesis with no native path, embed the data URL directly.
-    if (pg.narration) {
-      const narr = pg.narration
-      const srcPath = narr.sourcePath && !isTempUrl(narr.sourcePath) ? narr.sourcePath : ''
-      const dataFile = !srcPath && narr.file && narr.file.startsWith('data:') ? narr.file : ''
+    const encodeNarration = (track) => {
+      const narr = /** @type {Record<string, any>} */ (track || {})
+      const narrSourcePath = typeof narr['sourcePath'] === 'string' ? narr['sourcePath'] : ''
+      const narrFile = typeof narr['file'] === 'string' ? narr['file'] : ''
+      const srcPath = narrSourcePath && !isTempUrl(narrSourcePath) ? narrSourcePath : ''
+      const dataFile = !srcPath && narrFile.startsWith('data:') ? narrFile : ''
       if (srcPath || dataFile) {
-        pgExtMeta.narration = {
+        return {
           ...(srcPath ? { sourcePath: srcPath } : {}),
           ...(dataFile ? { file: dataFile } : {}),
-          name: narr.name || '',
-          autoPlay: narr.autoPlay !== false,
+          name: typeof narr['name'] === 'string' ? narr['name'] : '',
+          autoPlay: narr['autoPlay'] !== false,
+          offset: Number(narr['offset']) || 0,
+          ...(narr['id'] ? { id: narr['id'] } : {}),
+          ...(narr['lane'] ? { lane: Number(narr['lane']) || 1 } : {}),
+          ...(narr['textElementId'] ? { textElementId: narr['textElementId'] } : {}),
+          ...(narr['textPreview'] ? { textPreview: String(narr['textPreview']).slice(0, 200) } : {}),
+          ...(Array.isArray(narr['wordTimestamps']) && narr['wordTimestamps'].length
+            ? { wordTimestamps: narr['wordTimestamps'].map((w) => ({
+                start: Number(w?.start) || 0,
+                end: Number(w?.end) || 0,
+                text: String(w?.text ?? w?.word ?? ''),
+              })) }
+            : {}),
+          ...(narr['ttsVoiceId'] || narr['voiceId'] ? { ttsVoiceId: narr['ttsVoiceId'] || narr['voiceId'] } : {}),
+          ...(narr['ttsVoiceLabel'] || narr['voiceLabel'] ? { ttsVoiceLabel: narr['ttsVoiceLabel'] || narr['voiceLabel'] } : {}),
+          ...(narr['ttsRate'] || narr['rate'] ? { ttsRate: Number(narr['ttsRate'] || narr['rate']) || 1 } : {}),
         }
       }
+      return null
+    }
+    // Save page audio tracks: store sourcePath (native FS path) so they survive session restart.
+    // Never save ephemeral HTTP media server URLs (isTempUrl returns true for those).
+    // For TTS synthesis with no native path, embed the data URL directly.
+    const narrationMeta = encodeNarration(pg.narration)
+    if (narrationMeta) pgExtMeta.narration = narrationMeta
+    const narration2Meta = encodeNarration(pg.narration2)
+    if (narration2Meta) pgExtMeta.narration2 = narration2Meta
+    if (Array.isArray(pg.pageAudioClips) && pg.pageAudioClips.length) {
+      const clips = pg.pageAudioClips.map(encodeNarration).filter(Boolean)
+      if (clips.length) pgExtMeta.pageAudioClips = clips
     }
     if (Object.keys(pgExtMeta).length) out += `        // mme:pgext ${JSON.stringify(pgExtMeta)}\n`
 
     // Page-level visual script blocks (VariableEditor onStartScript / onEndScript)
-    if (pg.onStartScript?.length || pg.onEndScript?.length) {
+    if (pg.onStartScript?.length || pg.onEndScript?.length || pg.keyBindings?.length) {
       const scriptMeta = {}
       if (pg.onStartScript?.length) scriptMeta.onStartScript = pg.onStartScript
       if (pg.onEndScript?.length) scriptMeta.onEndScript = pg.onEndScript
+      if (pg.keyBindings?.length) scriptMeta.keyBindings = pg.keyBindings
       out += `        // mme:script ${JSON.stringify(scriptMeta)}\n`
     }
 

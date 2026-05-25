@@ -1,3 +1,5 @@
+// @ts-check
+
 /**
  * mediaRegistry — externalises large media blobs from React state.
  *

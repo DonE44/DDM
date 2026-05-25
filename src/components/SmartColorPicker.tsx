@@ -38,7 +38,7 @@ function swatchBg(hex: string): string {
 }
 
 /* ─── SmartColorPicker ─────────────────────────────────────────────────── */
-export default function SmartColorPicker({ value, onChange, style = undefined }) {
+export default function SmartColorPicker({ value, onChange }) {
   const [open, setOpen] = useState(false)
   const [panelPos, setPanelPos] = useState({ top: 0, left: 0 })
   const [tab, setTab] = useState('recent')
@@ -54,6 +54,9 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
   const wrapRef = useRef(null)
   const panelRef = useRef(null)
   const nativeRef = useRef(null)
+  const alphaTrackRef = useRef<HTMLDivElement | null>(null)
+  const currentDotRef = useRef<HTMLSpanElement | null>(null)
+  const triggerSwatchRef = useRef<HTMLSpanElement | null>(null)
   const PANEL_W = 220
   const PANEL_H = 300
 
@@ -105,6 +108,27 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
       window.removeEventListener('scroll', handler, true)
     }
   }, [open])
+
+  useEffect(() => {
+    if (!panelRef.current) return
+    panelRef.current.style.top = `${panelPos.top}px`
+    panelRef.current.style.left = `${panelPos.left}px`
+  }, [panelPos.top, panelPos.left, open])
+
+  useEffect(() => {
+    if (!alphaTrackRef.current) return
+    alphaTrackRef.current.style.setProperty('--scp-rgb', `${cr},${cg},${cb}`)
+  }, [cr, cg, cb])
+
+  useEffect(() => {
+    if (currentDotRef.current) currentDotRef.current.style.background = swatchBg(fullHex)
+    if (triggerSwatchRef.current) triggerSwatchRef.current.style.background = swatchBg(fullHex)
+  }, [fullHex])
+
+  function setDotBg(el: HTMLSpanElement | null, hex: string) {
+    if (!el) return
+    el.style.background = swatchBg(hex)
+  }
 
   function openPanel() {
     setRecent(getRecentColors())
@@ -195,7 +219,6 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
     <div
       ref={panelRef}
       className="scp-panel"
-      style={{ position: 'fixed', top: panelPos.top, left: panelPos.left, zIndex: 99999 }}
     >
       {/* Tabs */}
       <div className="scp-tabs">
@@ -207,18 +230,18 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
       {tab === 'recent' && (
         <div>
           {/* Transparent quick-pick */}
-          <div className="scp-row" style={{ marginBottom: 6 }}>
+          <div className="scp-row scp-row-mb6">
             <span
               className="scp-dot scp-transparent-dot"
               title="Transparent (#00000000)"
               onClick={() => { pick('#00000000'); setOpen(false) }}
             />
-            <span style={{ fontSize: 9, color: 'var(--t3)', marginLeft: 2 }}>Transparent</span>
+            <span className="scp-transparent-label">Transparent</span>
           </div>
           <div className="scp-swatches">
             {recent.length === 0 && <span className="scp-empty">No recent colours yet</span>}
             {recent.map((c, i) => (
-              <span key={i} className="scp-dot scp-transparent-bg" style={{ background: swatchBg(c) }} title={c} onClick={() => { pick(c); setOpen(false) }} />
+              <span key={i} ref={(el) => setDotBg(el, c)} className="scp-dot scp-transparent-bg" title={c} onClick={() => { pick(c); setOpen(false) }} />
             ))}
           </div>
           <div className="scp-row">
@@ -234,7 +257,7 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
             {saved.length === 0 && <span className="scp-empty">No saved colours yet</span>}
             {saved.map(sc => (
               <span key={sc.id} className="scp-saved-item" title={`${sc.name}\n${sc.hex}`}>
-                <span className="scp-dot scp-dot-lg scp-transparent-bg" style={{ background: swatchBg(sc.hex) }} onClick={() => { pick(sc.hex); setOpen(false) }} />
+                <span ref={(el) => setDotBg(el, sc.hex)} className="scp-dot scp-dot-lg scp-transparent-bg" onClick={() => { pick(sc.hex); setOpen(false) }} />
                 <span className="scp-saved-name" onClick={() => { pick(sc.hex); setOpen(false) }}>{sc.name}</span>
                 <button className="scp-del" onClick={() => handleDelColor(sc.id)}>✕</button>
               </span>
@@ -257,26 +280,26 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
               </div>
               <div className="scp-swatches">
                 {pal.colors.map((c, i) => (
-                  <span key={i} className="scp-dot scp-transparent-bg" style={{ background: swatchBg(c) }} title={c} onClick={() => { pick(c); setOpen(false) }} />
+                  <span key={i} ref={(el) => setDotBg(el, c)} className="scp-dot scp-transparent-bg" title={c} onClick={() => { pick(c); setOpen(false) }} />
                 ))}
               </div>
             </div>
           ))}
           {palettes.length === 0 && <span className="scp-empty">No palettes saved yet</span>}
-          <div className="scp-row" style={{ marginTop: 6 }}>
+          <div className="scp-row scp-row-mt6">
             <input className="scp-name-input" placeholder="Palette name…" value={palName} onChange={e => setPalName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSavePalette()} />
             <button className="scp-action-btn" onClick={handleSavePalette} title="Save recent colours as palette">＋ Save</button>
           </div>
           <label className="scp-extract-btn" title="Extract colour palette from an image">
             {extracting ? '⏳ Extracting…' : '🖼 From image…'}
-            <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleExtract} />
+            <input type="file" accept="image/*" className="scp-file-input" onChange={handleExtract} />
           </label>
         </div>
       )}
 
       {/* Current colour + hex input + alpha + native picker access */}
       <div className="scp-current">
-        <span className="scp-dot scp-dot-lg scp-transparent-bg" style={{ background: swatchBg(fullHex), flexShrink: 0 }} />
+        <span ref={currentDotRef} className="scp-dot scp-dot-lg scp-transparent-bg" />
         <input
           className={`scp-hex-input${hexErr ? ' scp-hex-err' : ''}`}
           value={hexInput}
@@ -288,16 +311,15 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
         />
         <span className="scp-alpha-pct" title={`Alpha: ${alphaPct}%`}>{alphaPct}%</span>
         <button
-          className="scp-action-btn"
+          className="scp-action-btn scp-wheel-btn"
           title="Open colour wheel"
-          style={{ padding: '0 4px', minWidth: 'unset' }}
           onClick={() => nativeRef.current?.click()}
         >🎨</button>
       </div>
       {/* Alpha slider */}
       <div className="scp-alpha-row">
         <span className="scp-alpha-label">α</span>
-        <div className="scp-alpha-track scp-transparent-bg" style={{ '--scp-rgb': `${cr},${cg},${cb}` } as any}>
+        <div ref={alphaTrackRef} className="scp-alpha-track scp-transparent-bg">
           <input
             type="range" min={0} max={100} value={alphaPct}
             className="scp-alpha-slider"
@@ -310,11 +332,11 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
   ) : null
 
   return (
-    <span className="scp-wrap" style={style} ref={wrapRef}>
+    <span className="scp-wrap" ref={wrapRef}>
       {/* Colour swatch — click to open panel (with alpha/transparent support) */}
       <span
+        ref={triggerSwatchRef}
         className="scp-swatch scp-transparent-bg"
-        style={{ background: swatchBg(fullHex) }}
         onClick={() => open ? setOpen(false) : openPanel()}
         title={`${fullHex} — click to edit`}
       />
@@ -325,6 +347,8 @@ export default function SmartColorPicker({ value, onChange, style = undefined })
         value={rgbHex}
         onChange={handleNativeChange}
         className="scp-native"
+        aria-label="Native color picker"
+        title="Native color picker"
         onBlur={() => pushRecentColor(fullHex)}
       />
       {/* Dropdown toggle */}

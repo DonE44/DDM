@@ -1,17 +1,18 @@
 /**
- * ImportPagesDialog.jsx — Import pages from a .mme / .sca project file.
+ * ImportPagesDialog.jsx — Import script pages from a .mme project file.
  *
- * Props:
- *   importedData  { pages, stage, projectVars } — already-parsed import data
- *   onImport      (selectedPages: object[]) => void
- *   onCancel      () => void
+ * @param {{
+ *   importedData: { pages?: import('../types/desktop-api').SmmPage[], stage?: Partial<import('../types/desktop-api').SmmStage>, projectVars?: object[] },
+ *   onImport: (selectedPages: import('../types/desktop-api').SmmPage[], insertAfter: 'end' | number) => void,
+ *   onCancel: () => void,
+ * }} props
  */
 
 import { useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 
 export default function ImportPagesDialog({ importedData, onImport, onCancel }) {
-  const { pages = [], stage = {} } = importedData
+  const { pages = [], stage = {}, sourceLabel = 'Imported project' } = importedData
   const [selected, setSelected] = useState(() => new Set(pages.map((_, i) => i)))
   const [insertAfter, setInsertAfter] = useState('end')   // 'end' | number
 
@@ -42,13 +43,13 @@ export default function ImportPagesDialog({ importedData, onImport, onCancel }) 
       >
         {/* Header */}
         <div className="modal-header" style={{ padding: '12px 18px' }}>
-          <span style={{ fontWeight: 700, color: '#e8a020' }}>📥 Import Pages from Project</span>
+          <span style={{ fontWeight: 700, color: '#e8a020' }}>📥 Import Script from Project</span>
           <button className="modal-close" onClick={onCancel}>✕</button>
         </div>
 
         {/* Stage info */}
         <div style={{ padding: '8px 18px', background: '#0f1e30', borderBottom: '1px solid #1a2e50', fontSize: 12, color: '#6090c0' }}>
-          Imported project: <strong style={{ color: '#8ab0d0' }}>{pages.length} page{pages.length !== 1 ? 's' : ''}</strong>
+          {sourceLabel}: <strong style={{ color: '#8ab0d0' }}>{pages.length} page{pages.length !== 1 ? 's' : ''}</strong>
           {stage.width ? <span> — stage {stage.width} × {stage.height}</span> : null}
         </div>
 

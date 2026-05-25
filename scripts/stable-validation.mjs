@@ -7,14 +7,22 @@ const root = path.resolve(__dirname, '..')
 const nodeExe = process.execPath
 
 const WINDOWS_ACCESS_VIOLATION = 3221225501
+const buildArgs = ['node_modules/vite/bin/vite.js', 'build']
+if (process.env.FLUXAURA_BUILD_DEBUG === '1') buildArgs.push('--debug')
+
 const steps = [
   {
     name: 'lint',
-    args: ['node_modules/eslint/bin/eslint.js', '.', '--max-warnings', '0'],
+    args: ['node_modules/eslint/bin/eslint.js', 'src', 'electron', 'scripts', '--max-warnings', '0'],
+  },
+  {
+    name: 'publish:smoke',
+    args: ['scripts/publish-runtime-toggle-smoke.mjs'],
   },
   {
     name: 'build',
-    args: ['node_modules/vite/bin/vite.js', 'build', '--debug'],
+    args: buildArgs,
+    env: { FLUXAURA_FAST_VALIDATE: '1' },
   },
   {
     name: 'commands:audit',
@@ -36,6 +44,7 @@ function runStep(step, attempt) {
     console.log(`\n[stable-validation] ${step.name} ${attempt > 1 ? `(retry ${attempt})` : ''}`)
     const child = spawn(nodeExe, step.args, {
       cwd: root,
+      env: { ...process.env, ...(step.env || {}) },
       stdio: 'inherit',
       windowsHide: true,
       shell: false,

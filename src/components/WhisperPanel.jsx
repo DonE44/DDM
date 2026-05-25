@@ -47,6 +47,8 @@ export default function WhisperPanel({
   onClose,
   /** Compact inline mode for embedding in inspector */
   compact = false,
+  /** Transcription mode for Whisper main-process pipeline */
+  transcriptionMode = 'normal',
 }) {
   const [available, setAvailable] = useState(/** @type {boolean|null} */ (null))
   const [modelId, setModelId] = useState(DEFAULT_WHISPER_MODEL)
@@ -57,9 +59,10 @@ function ignoreError() {}
   const [transcribing, setTranscribing] = useState(false)
   const [modelProgress, setModelProgress] = useState({ status: '', file: '', progress: 0 })
   const [transcribeProgress, setTranscribeProgress] = useState(0)
-  const [result, setResult] = useState({ text: '', segments: [], language: '' })
+  const [result, setResult] = useState({ text: '', segments: [], language: '', engine: 'xenova', method: null, model: null, warnings: [], gaps: [] })
   const [editedText, setEditedText] = useState('')
   const [status, setStatus] = useState('')
+  const [engineStatusText, setEngineStatusText] = useState('')
   const [showSrt, setShowSrt] = useState(false)
   const [customAudioUrl, setCustomAudioUrl] = useState(audioUrl)
   const [customAudioName, setCustomAudioName] = useState(audioName)
@@ -77,6 +80,9 @@ function ignoreError() {}
   }, [audioUrl, audioName])
 
   const refreshModelCacheStatus = useCallback(async () => {
+    const modelIdForCache = modelId.startsWith('whispercpp-') || modelId === 'auto-best'
+      ? 'Xenova/whisper-medium'
+      : modelId
     const selectedModel = WHISPER_MODELS.find((m) => m.id === modelId)
     if (modelId === 'openai-api') {
       setModelCacheStatus({ state: 'cloud', message: 'OpenAI API uses a cloud model; no local Whisper cache is used.' })
@@ -90,7 +96,7 @@ function ignoreError() {}
 
     setModelCacheBusy(true)
     try {
-      const info = await window.smmDesktop.whisper.modelStatus({ modelId })
+      const info = await window.smmDesktop.whisper.modelStatus({ modelId: modelIdForCache })
       const sizeText = selectedModel?.size ? ` (${selectedModel.size})` : ''
       if (info?.allCached) {
         const detailText = info.fileCount ? `, ${info.fileCount} files, ${formatCacheBytes(info.sizeBytes || 0)}` : ''
@@ -105,9 +111,35 @@ function ignoreError() {}
     }
   }, [modelId])
 
+  const refreshEngineStatus = useCallback(async () => {
+    if (!window.smmDesktop?.whisper?.engineStatus) return
+    try {
+      const info = await window.smmDesktop.whisper.engineStatus()
+      const cpp = Array.isArray(info?.availableEngines)
+        ? info.availableEngines.find((e) => e.id === 'whisper.cpp')
+        : null
+      if (!cpp) {
+        setEngineStatusText('')
+        return
+      }
+      if (cpp.available) {
+        const count = Array.isArray(cpp.modelCandidates) ? cpp.modelCandidates.length : 0
+        setEngineStatusText(`whisper.cpp available (${count} model candidate${count === 1 ? '' : 's'}).`)
+      } else {
+        setEngineStatusText('whisper.cpp not installed. Add whisper-cli/main.exe and GGML/GGUF model file.')
+      }
+    } catch {
+      setEngineStatusText('')
+    }
+  }, [])
+
   useEffect(() => {
     if (!transcribing) refreshModelCacheStatus()
   }, [modelId, transcribing, refreshModelCacheStatus])
+
+  useEffect(() => {
+    refreshEngineStatus()
+  }, [modelId, refreshEngineStatus])
 
   const handleClearModelCache = useCallback(async () => {
     if (modelId === 'openai-api' || modelCacheBusy || transcribing) return
@@ -134,7 +166,7 @@ function ignoreError() {}
     setTranscribing(true)
     setStatus(hasSharedBuf ? 'Loading model…' : 'Loading model (single-thread mode — no SharedArrayBuffer)…')
     setTranscribeProgress(0)
-    setResult({ text: '', segments: [], language: '' })
+    setResult({ text: '', segments: [], language: '', engine: 'xenova', method: null, model: null, warnings: [], gaps: [] })
     setEditedText('')
 
     try {
@@ -142,6 +174,7 @@ function ignoreError() {}
         model: modelId,
         audioFilePath: customAudioFilePath || undefined,
         wordTimestamps: true,
+        transcriptionMode,
         apiKey: openAiKey || undefined,
         onModelProgress: (prog) => {
           const file = (prog.file || '').split(/[\\/]/).pop() || ''
@@ -176,7 +209,8 @@ function ignoreError() {}
       setEditedText(res.text)
       // Show first 120 chars of transcribed text in status so user can confirm it worked
       const preview = res.text ? `"${res.text.slice(0, 120)}${res.text.length > 120 ? '…' : ''}"` : '(no text returned)'
-      setStatus(`✅ Done (${res.language}) — ${res.segments.length} segments — ${preview}`)
+      const warningText = Array.isArray(res.warnings) && res.warnings.length ? ` ⚠ ${res.warnings[0]}` : ''
+      setStatus(`✅ Done (${res.language}, ${res.engine || 'xenova'}) — ${res.segments.length} segments — ${preview}${warningText}`)
 
       if (onTranscribeComplete) {
         onTranscribeComplete(res)
@@ -197,7 +231,7 @@ function ignoreError() {}
     }
   // onTranscribeComplete and onCreateLyricPages are stable callback refs from parent —
   // including them avoids stale closure without causing unnecessary re-runs.
-  }, [customAudioUrl, customAudioFilePath, modelId, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey, refreshModelCacheStatus])
+  }, [customAudioUrl, customAudioFilePath, modelId, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey, refreshModelCacheStatus, transcriptionMode])
 
   const handleAbort = () => {
     abortTranscription()
@@ -315,6 +349,9 @@ function ignoreError() {}
             ⚠ This model requires the Electron desktop app and will error in the browser preview.
             Use Tiny, Base, or Small for browser testing.
           </div>
+        )}
+        {engineStatusText && (
+          <div style={{ fontSize: 10, color: 'var(--t3,#888)', marginTop: 3 }}>{engineStatusText}</div>
         )}
         <div style={S.cachePanel}>
           <div style={{ ...S.muted, color: modelCacheStatus.state === 'ready' ? '#22c55e' : modelCacheStatus.state === 'error' ? '#ef4444' : 'var(--t3, #888)' }}>
@@ -451,6 +488,41 @@ function ignoreError() {}
                 style={S.secondaryBtn}
               >
                 ⬇ Export .srt
+              </button>
+            )}
+            {window.smmDesktop?.whisper?.exportDebug && (
+              <button
+                onClick={async () => {
+                  const r = await window.smmDesktop.whisper.exportDebug({
+                    request: {
+                      audioUrl: customAudioUrl,
+                      audioFilePath: customAudioFilePath,
+                      modelId,
+                    },
+                    output: {
+                      text: result.text,
+                      chunks: result.segments,
+                      wordTimestamps: result.wordTimestamps || [],
+                      engine: result.engine || 'xenova',
+                      method: result.method || null,
+                      model: result.model || modelId,
+                      fullText: result.text,
+                      fullTextPreview: String(result.text || '').slice(0, 1000),
+                      warnings: result.warnings || [],
+                      gaps: result.gaps || [],
+                      containsGasoline: !!result.containsGasoline,
+                      containsFingers: !!result.containsFingers,
+                      containsMatch: !!result.containsMatch,
+                      firstTenChunks: (result.segments || []).slice(0, 10),
+                      lyricLines: segmentsToLyricLines(result.segments || []),
+                    },
+                  })
+                  if (r?.ok && r.filePath) setStatus(`🧾 Debug exported: ${r.filePath}`)
+                  else setStatus(`❌ Debug export failed: ${r?.error || 'unknown error'}`)
+                }}
+                style={S.secondaryBtn}
+              >
+                🧾 Export Transcription Debug JSON
               </button>
             )}
           </div>

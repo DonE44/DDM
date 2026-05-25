@@ -17,6 +17,7 @@
     /* Incremental strictness — start lenient, tighten over time */
     "allowJs": true,
     "checkJs": false,
+    "forceConsistentCasingInFileNames": true,
     "strict": false,
     "noImplicitAny": false,
     "strictNullChecks": false,

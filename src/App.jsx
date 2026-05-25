@@ -6,7 +6,7 @@ import ShapeButton, { ShapeButtonInspector } from './ShapeButton'
 import { SW, SH, STAGE_PRESETS, SQUARE_BOOK_DPI_OPTIONS, WIPES, BTN_SHAPES, ANIM_IN_TYPES, ANIM_OUT_TYPES, ANIM_LOOP_TYPES, RETRO_BTN_PRESETS, BTN_ACTIONS, FONT_LIST, PROJECT_TEMPLATES, WIPE_META, WIPE_CATEGORIES, FLYIN_META } from './constants/index.js'
 import { _clickAudioMap, _midiSynthRegistry, playAudio, stopAllAudio } from './utils/audioUtils.js'
 import { detectMediaKind, isMidiMedia, readBrowserFileAsDataUrl, getMediaExtension, isUnresolvedMediaPath, isTempUrl, inferMediaCapability } from './utils/mediaUtils.js'
-import { uid, reindexZByCurrentOrder, drawGridCanvas, moveOrResizeElementHelper, clampPageToStage, getPresetKey, makeElem, makePage, pageBgCss, bgMediaTransitionClass, esc, getMediaShadowStyle } from './utils/stageUtils.js'
+import { uid, reindexZByCurrentOrder, drawGridCanvas, moveOrResizeElementHelper, clampPageToStage, makeElem, makePage, pageBgCss, bgMediaTransitionClass, esc, getMediaShadowStyle } from './utils/stageUtils.js'
 import { internDataUrl } from './utils/mediaRegistry.js'
 import ChromaKeyModal from './modals/ChromaKeyModal.jsx'
 import { parseMME, genMME } from './utils/scaUtils.js'
@@ -28,12 +28,15 @@ import FrameBorderEditor, { DEFAULT_FRAME, getFrameCSS } from './modals/FrameBor
 import PublishDialog from './modals/PublishDialog.jsx'
 import ImportPagesDialog from './modals/ImportPagesDialog.jsx'
 import { importProjectPages, resolveMediaForExport } from './utils/publishUtils.js'
+import { detectTier, applyTierToDocument } from './utils/performanceTier.js'
 import MenuBarElement from './components/MenuBarElement.jsx'
 import MenuBarEditorModal from './modals/MenuBarEditorModal.jsx'
 import VideoChromaCanvas from './components/VideoChromaCanvas.jsx'
+import ImageChromaCanvas from './components/ImageChromaCanvas.jsx'
 import FontPicker from './components/FontPicker.jsx'
 import PiperTTSPanel from './components/PiperTTSPanel.jsx'
 import WhisperPanel from './components/WhisperPanel.jsx'
+import { DEFAULT_WHISPER_MODEL, transcribe } from './utils/whisperUtils.js'
 import HFTokenSettings from './components/HFTokenSettings.jsx'
 import LyricVideoWizard from './modals/LyricVideoWizard.jsx'
 import ScriptExportModal from './modals/ScriptExportModal.jsx'
@@ -49,7 +52,7 @@ import {
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   Group, Ungroup, PanelLeft, PanelRight, Film, LayoutGrid, Plus, Minus,
   ArrowUp, ArrowDown, RefreshCw, Stethoscope, GitBranch, Code2,
-  SlidersHorizontal, Pencil, X, Camera,
+  SlidersHorizontal, Pencil, X, Camera, EyeOff,
 } from 'lucide-react'
 
 const APP_SETTINGS_KEY = 'fluxaura_app_settings_v1'
@@ -69,6 +72,119 @@ function loadAppSettings() {
 
 function saveAppSettings(settings) {
   try { localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(settings)) } catch { /* noop */ }
+}
+
+function pageTimingDurationMs(timing) {
+  const tm = timing || {}
+  if (Number(tm.durationMs) > 0) return Math.max(0, Math.round(Number(tm.durationMs)))
+  const sec = Number(tm.duration) || 0
+  const ms = Number(tm.ms) || 0
+  return Math.max(0, Math.round(sec * 1000 + ms))
+}
+
+function estimateTimelineAudioDurationSeconds(clip) {
+  const explicit = Number(
+    clip?.duration ??
+    clip?.mediaDuration ??
+    clip?.audioDuration ??
+    clip?.clipDuration ??
+    clip?.naturalDuration
+  )
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+
+  const text = String(
+    clip?.textPreview ??
+    clip?.sourceText ??
+    clip?.transcript ??
+    clip?.elLabel ??
+    clip?.label ??
+    clip?.name ??
+    ''
+  ).trim()
+  if (!text) return 0
+  const words = text.split(/\s+/).filter(Boolean).length
+  return Math.max(1.5, words / 2.4)
+}
+
+function timelineAudioOffsetSeconds(clip) {
+  const offset = Number(
+    clip?.pageAudioOffset ??
+    clip?.mediaStartTime ??
+    clip?.offset ??
+    clip?.startTime ??
+    0
+  )
+  return Number.isFinite(offset) && offset > 0 ? offset : 0
+}
+
+function isPageNarrationAudioElement(el) {
+  const lane = Number(el?.pageAudioLane || 0)
+  return (lane === 1 || lane === 2) && !!el?.file
+}
+
+function pageAudioTimelineExtentSeconds(page) {
+  if (!page) return 0
+  let end = 0
+  const addClip = (clip) => {
+    if (!clip) return
+    const clipEnd = timelineAudioOffsetSeconds(clip) + estimateTimelineAudioDurationSeconds(clip)
+    if (Number.isFinite(clipEnd) && clipEnd > end) end = clipEnd
+  }
+
+  ;(page.elements || []).filter(isPageNarrationAudioElement).forEach(addClip)
+  ;(page.pageAudioClips || []).forEach(addClip)
+
+  if (page.narration || page.narrationFile || page.audio1 || page.pageAudio1) {
+    addClip({
+      file: page.narrationFile || page.narration || page.audio1 || page.pageAudio1,
+      duration: page.narrationDuration || page.audio1Duration || page.pageAudio1Duration,
+      offset: page.narrationOffset || page.audio1Offset || page.pageAudio1Offset,
+    })
+  }
+  if (page.narration2 || page.narration2File || page.audio2 || page.pageAudio2) {
+    addClip({
+      file: page.narration2File || page.narration2 || page.audio2 || page.pageAudio2,
+      duration: page.narration2Duration || page.audio2Duration || page.pageAudio2Duration,
+      offset: page.narration2Offset || page.audio2Offset || page.pageAudio2Offset,
+    })
+  }
+
+  return end
+}
+
+function pageTimingDurationMsForPage(page) {
+  const baseMs = pageTimingDurationMs(page?.timing)
+  if (page?.timing?.mode !== 'pause') return baseMs
+  const audioMs = Math.ceil(pageAudioTimelineExtentSeconds(page) * 1000)
+  return Math.max(baseMs, audioMs)
+}
+
+function timingPatchFromSeconds(seconds) {
+  const duration = Math.max(0, Math.round((Number(seconds) || 0) * 1000) / 1000)
+  return {
+    duration,
+    durationMs: Math.round(duration * 1000),
+    ms: 0,
+  }
+}
+
+function timingPartsFromMs(totalMs) {
+  let remaining = Math.max(0, Math.round(Number(totalMs) || 0))
+  const hours = Math.floor(remaining / 3600000)
+  remaining -= hours * 3600000
+  const minutes = Math.floor(remaining / 60000)
+  remaining -= minutes * 60000
+  const seconds = Math.floor(remaining / 1000)
+  const milliseconds = remaining - seconds * 1000
+  return { hours, minutes, seconds, milliseconds }
+}
+
+function timingMsFromParts(parts) {
+  const h = Math.max(0, Number(parts.hours) || 0)
+  const m = Math.max(0, Number(parts.minutes) || 0)
+  const s = Math.max(0, Number(parts.seconds) || 0)
+  const ms = Math.max(0, Number(parts.milliseconds) || 0)
+  return Math.round(h * 3600000 + m * 60000 + s * 1000 + ms)
 }
 
 /** @returns {import('./types/desktop-api').SmmPage[]} */
@@ -230,6 +346,72 @@ function generateMemoryGameVars() {
   ]
 }
 
+function generateQuizVars() {
+  const mkv = (name, type, defaultValue, description = '') => ({
+    id: `_${Math.random().toString(36).slice(2, 8)}`,
+    name, type, defaultValue: defaultValue ?? (type === 'number' ? 0 : ''), description,
+  })
+  return [
+    mkv('quiz_score', 'number', 0, 'Current quiz score'),
+    mkv('quiz_wrong', 'number', 0, 'Incorrect answer attempts'),
+    mkv('quiz_total', 'number', 10, 'Total number of questions'),
+    ...Array.from({ length: 10 }, (_, i) => mkv(`quiz_correct_${i + 1}`, 'text', '', `Question ${i + 1} correct answer`)),
+    ...Array.from({ length: 10 }, (_, i) => mkv(`quiz_answered_${i + 1}`, 'number', 0, `Question ${i + 1} answered flag`)),
+    ...Array.from({ length: 10 }, (_, i) => mkv(`quiz_selected_${i + 1}`, 'text', '', `Question ${i + 1} selected answer`)),
+    mkv('quiz_result_message', 'text', '', 'Message shown on the results page'),
+  ]
+}
+
+function generatePuzzleVars() {
+  const mkv = (name, type, defaultValue, description = '') => ({
+    id: `_${Math.random().toString(36).slice(2, 8)}`,
+    name, type, defaultValue: defaultValue ?? (type === 'number' ? 0 : ''), description,
+  })
+  return [
+    mkv('puzzle_dial_1', 'number', 0, 'First vault-lock dial'),
+    mkv('puzzle_dial_2', 'number', 0, 'Second vault-lock dial'),
+    mkv('puzzle_dial_3', 'number', 0, 'Third vault-lock dial'),
+    mkv('puzzle_attempts', 'number', 0, 'Number of submitted guesses'),
+    mkv('puzzle_score', 'number', 0, 'Score from the latest solved puzzle'),
+    mkv('puzzle_best', 'number', 0, 'Best saved vault-lock score'),
+    mkv('puzzle_code', 'text', '123', 'Correct three-digit vault-lock code'),
+    mkv('puzzle_guess', 'text', '000', 'Current three-digit guess'),
+    mkv('puzzle_feedback', 'text', '', 'Current hint or feedback message'),
+  ]
+}
+
+function generateMazeGameVars() {
+  const mkv = (name, type, defaultValue, description = '') => ({
+    id: `_${Math.random().toString(36).slice(2, 8)}`,
+    name, type, defaultValue: defaultValue ?? (type === 'number' ? 0 : ''), description,
+  })
+  return [
+    mkv('maze_player', 'text', '@', 'Player character shown in the maze'),
+    mkv('maze_level', 'number', 1, 'Current maze level'),
+    mkv('maze_pos', 'text', '1_1', 'Current player position as row_col'),
+    mkv('maze_moved', 'number', 0, 'Move guard for one-step movement scripts'),
+    mkv('maze_moves', 'number', 0, 'Total successful moves'),
+    mkv('maze_score', 'number', 300, 'Current score, reduced by each move'),
+    mkv('maze_best', 'number', 0, 'Best saved maze score'),
+    mkv('maze_status', 'text', '', 'Current maze feedback message'),
+  ]
+}
+
+function generateLessonVars() {
+  const mkv = (name, type, defaultValue, description = '') => ({
+    id: `_${Math.random().toString(36).slice(2, 8)}`,
+    name, type, defaultValue: defaultValue ?? (type === 'number' ? 0 : ''), description,
+  })
+  return [
+    mkv('lesson_progress', 'number', 0, 'Current lesson progress percentage'),
+    mkv('lesson_score', 'number', 0, 'Checkpoint score'),
+    mkv('lesson_wrong', 'number', 0, 'Incorrect checkpoint attempts'),
+    mkv('lesson_complete', 'number', 0, 'Completion flag'),
+    mkv('lesson_best', 'number', 0, 'Best saved lesson score'),
+    mkv('lesson_feedback', 'text', '', 'Checkpoint and completion feedback'),
+  ]
+}
+
 /** @param {typeof DEFAULT_MEM_GAME_CONFIG} [config]
  * @returns {import('./types/desktop-api').SmmPage[]} */
 function generateMemoryGamePages(config) {
@@ -265,6 +447,55 @@ function generateMemoryGamePages(config) {
     fontSize: 14, font: 'Rajdhani', fontWeight: '700',
   })
 
+  const setText = (elLabel, textValue) => ({ id: uid6(), type: 'set-text', elLabel, textValue })
+  const showEl = (elLabel) => ({ id: uid6(), type: 'show-el', elLabel })
+  const hideEl = (elLabel) => ({ id: uid6(), type: 'hide-el', elLabel })
+  const setVar = (varName, value) => ({ id: uid6(), type: 'set-var', varName, value })
+  const changeVar = (varName, amount) => ({ id: uid6(), type: 'change-var', varName, op: '+', amount: String(amount) })
+  const goTo = (targetPage) => ({ id: uid6(), type: 'go-to', targetPage })
+  const ifThen = (condVar, condOp, condVal, thenBlocks, elseBlocks = []) => ({
+    id: uid6(), type: 'if-then', condVar, condOp, condVal, thenBlocks, elseBlocks,
+  })
+
+  const cardScript = (cardIdx) => [
+    ifThen('mg_lock', '==', '0', [
+      hideEl(`mg-back-${cardIdx}`),
+      showEl(`mg-face-${cardIdx}`),
+      changeVar('mg_flips', 1),
+      setText('mg-txt-flips', '{mg_flips}'),
+      ifThen('mg_first', '==', '-1', [
+        setVar('mg_first', String(cardIdx)),
+        setVar('mg_firstSym', `mg_sym[${cardIdx}]`),
+      ], [
+        ifThen('mg_firstSym', '==', `mg_sym[${cardIdx}]`, [
+          { id: uid6(), type: 'set-array-item', arrRef: `mg_state[${cardIdx}]`, value: '1' },
+          { id: uid6(), type: 'set-array-item', arrRef: 'mg_state[mg_first]', value: '1' },
+          changeVar('mg_matches', 1),
+          setText('mg-txt-pairs', '{mg_matches} / 8'),
+          setVar('mg_first', '-1'),
+          setVar('mg_firstSym', ''),
+          ifThen('mg_matches', '>=', '8', [
+            ifThen('mg_flips', '<', 'mg_best', [
+              setVar('mg_best', 'mg_flips'),
+              setText('mg-txt-best', '{mg_best}'),
+            ]),
+            goTo('Win!'),
+          ]),
+        ], [
+          setVar('mg_lock', '1'),
+          { id: uid6(), type: 'wait-sec', seconds: 0.75 },
+          showEl(`mg-back-${cardIdx}`),
+          hideEl(`mg-face-${cardIdx}`),
+          showEl('mg-back-{mg_first}'),
+          hideEl('mg-face-{mg_first}'),
+          setVar('mg_first', '-1'),
+          setVar('mg_firstSym', ''),
+          setVar('mg_lock', '0'),
+        ]),
+      ]),
+    ]),
+  ]
+
   // Build 16 card-back + 16 card-face button elements
   const cardElements = /** @type {import('./types/desktop-api').SmmElement[]} */ ([])
   for (let i = 0; i < 16; i++) {
@@ -286,6 +517,7 @@ function generateMemoryGamePages(config) {
       fontSize: 28, font: 'Rajdhani', fontWeight: '700',
       ...(cfg.backImage ? { btnImage: cfg.backImage } : {}),
       action: 'script', visible: true,
+      script: cardScript(i),
       z: 10 + i,
     })
 
@@ -299,7 +531,7 @@ function generateMemoryGamePages(config) {
       radius: '6px', bevel: false,
       fontSize: 40, font: 'Rajdhani', fontWeight: '700',
       ...(pair.image ? { btnImage: pair.image } : {}),
-      action: 'script', visible: false,
+      action: 'event', visible: false,
       z: 26 + i,
     })
   }
@@ -316,9 +548,18 @@ function generateMemoryGamePages(config) {
     ...CARD_SYMS.map((sym, i) => ({
       id: uid6(), type: 'set-array-item', arrRef: `mg_sym[${i}]`, value: sym,
     })),
+    { id: uid6(), type: 'shuffle-array', arrName: 'mg_sym', size: 16 },
     ...Array.from({ length: 16 }, (_, i) => ({
       id: uid6(), type: 'set-array-item', arrRef: `mg_state[${i}]`, value: '0',
     })),
+    ...Array.from({ length: 16 }, (_, i) => setText(`mg-face-${i}`, `{mg_sym[${i}]}`)),
+    setText('mg-txt-flips', '{mg_flips}'),
+    setText('mg-txt-pairs', '{mg_matches} / 8'),
+    setText('mg-txt-best', '{mg_best}'),
+    ...Array.from({ length: 16 }, (_, i) => [
+      showEl(`mg-back-${i}`),
+      hideEl(`mg-face-${i}`),
+    ]).flat(),
   ]
 
   /* -- Page 1: Title/Intro -- */
@@ -353,7 +594,7 @@ function generateMemoryGamePages(config) {
       txt('Best:',          446,  4,  50, 18,  11, '#6090b0'),
       txt('--',             498,  4,  60, 18,  13, '#f0a040', 'mg-txt-best'),
       ...cardElements,
-      navBtn('New Game',  10, 450, 130, 26, 'script', '', 'btn-newgame'),
+      navBtn('New Game',  10, 450, 130, 26, 'goto', 'Play', 'btn-newgame'),
       navBtn('Quit',     500, 450, 130, 26, 'quit',   '', 'btn-quit'),
     ]),
   }
@@ -368,7 +609,7 @@ function generateMemoryGamePages(config) {
       txt('🎉 You Won!',           60, 110, 520, 90,  60, '#ffd700'),
       txt('All 8 pairs matched!',        60, 215, 520, 40,  22, '#c0f0c0'),
       txt('Check your flip count above.',60, 262, 520, 36,  16, '#6090a0'),
-      navBtn('▶  Play Again', 190, 340, 260, 52, 'goto', cfg.title, 'btn-again'),
+      navBtn('▶  Play Again', 190, 340, 260, 52, 'goto', 'Play', 'btn-again'),
       navBtn('✕  Quit',       190, 404, 260, 40, 'quit', '',         'btn-quit'),
     ]),
   }
@@ -681,108 +922,835 @@ function generateTemplatePages(tpl) {
 
   /* ── Quiz ── */
   if (id === 'quiz') {
-    const question = (name, qtext, opts, correctTarget) => {
+    const questions = [
+      { question: 'What is the capital of France?', options: ['Berlin', 'Madrid', 'Paris', 'Rome'], answer: 'Paris' },
+      { question: 'Which planet is known as the Red Planet?', options: ['Earth', 'Mars', 'Venus', 'Jupiter'], answer: 'Mars' },
+      { question: "Who wrote 'Hamlet'?", options: ['Charles Dickens', 'J.K. Rowling', 'William Shakespeare', 'Mark Twain'], answer: 'William Shakespeare' },
+      { question: 'What is the largest ocean on Earth?', options: ['Atlantic Ocean', 'Indian Ocean', 'Arctic Ocean', 'Pacific Ocean'], answer: 'Pacific Ocean' },
+      { question: 'What is the chemical symbol for gold?', options: ['Au', 'Ag', 'Gd', 'Go'], answer: 'Au' },
+      { question: 'Which is the tallest mountain in the world?', options: ['K2', 'Mount Kilimanjaro', 'Mount Everest', 'Denali'], answer: 'Mount Everest' },
+      { question: 'What year did the Titanic sink?', options: ['1912', '1905', '1898', '1923'], answer: '1912' },
+      { question: 'Who painted the Mona Lisa?', options: ['Vincent van Gogh', 'Pablo Picasso', 'Leonardo da Vinci', 'Claude Monet'], answer: 'Leonardo da Vinci' },
+      { question: 'What is the hardest natural substance on Earth?', options: ['Gold', 'Iron', 'Diamond', 'Quartz'], answer: 'Diamond' },
+      { question: 'How many continents are there on Earth?', options: ['5', '6', '7', '8'], answer: '7' },
+    ]
+    const blockId = () => `_${Math.random().toString(36).slice(2, 8)}`
+    const qTotal = questions.length
+    const resetScript = [
+      { id: blockId(), type: 'set-var', varName: 'quiz_score', value: '0' },
+      { id: blockId(), type: 'set-var', varName: 'quiz_wrong', value: '0' },
+      { id: blockId(), type: 'set-var', varName: 'quiz_total', value: String(qTotal) },
+      { id: blockId(), type: 'set-var', varName: 'quiz_result_message', value: '' },
+      ...questions.flatMap((_, i) => [
+        { id: blockId(), type: 'set-var', varName: `quiz_correct_${i + 1}`, value: questions[i].answer },
+        { id: blockId(), type: 'set-var', varName: `quiz_answered_${i + 1}`, value: '0' },
+        { id: blockId(), type: 'set-var', varName: `quiz_selected_${i + 1}`, value: '' },
+      ]),
+    ]
+    const answerScript = (qNum, option, correctAnswer) => [
+      {
+        id: blockId(), type: 'if-then',
+        condVar: `quiz_answered_${qNum}`, condOp: '==', condVal: '0',
+        thenBlocks: [
+          { id: blockId(), type: 'set-var', varName: `quiz_selected_${qNum}`, value: option },
+          {
+            id: blockId(), type: 'if-then',
+            condVar: `quiz_selected_${qNum}`, condOp: '==', condVal: correctAnswer,
+            thenBlocks: [
+                { id: blockId(), type: 'change-var', varName: 'quiz_score', op: '+', amount: '1' },
+                { id: blockId(), type: 'set-var', varName: `quiz_answered_${qNum}`, value: '1' },
+              ],
+            elseBlocks: [
+                { id: blockId(), type: 'change-var', varName: 'quiz_wrong', op: '+', amount: '1' },
+              ],
+          },
+        ],
+        elseBlocks: [],
+      },
+      {
+        id: blockId(), type: 'if-then',
+        condVar: `quiz_selected_${qNum}`, condOp: '==', condVal: correctAnswer,
+        thenBlocks: [{ id: blockId(), type: 'go-to', targetPage: `Correct Answer ${qNum}` }],
+        elseBlocks: [{ id: blockId(), type: 'go-to', targetPage: `Incorrect Answer ${qNum}` }],
+      },
+    ]
+    const resultsScript = [
+      { id: blockId(), type: 'set-text', elLabel: 'quiz-score-text', textValue: '{quiz_score}/10' },
+      { id: blockId(), type: 'set-text', elLabel: 'quiz-wrong-text', textValue: 'Incorrect attempts: {quiz_wrong}' },
+      {
+        id: blockId(), type: 'if-then', condVar: 'quiz_score', condOp: '>=', condVal: '10',
+        thenBlocks: [
+          { id: blockId(), type: 'set-var', varName: 'quiz_result_message', value: 'Perfect Score! You are a genius!' },
+        ],
+        elseBlocks: [{
+          id: blockId(), type: 'if-then', condVar: 'quiz_score', condOp: '>=', condVal: '7',
+          thenBlocks: [{ id: blockId(), type: 'set-var', varName: 'quiz_result_message', value: 'Great job! You really know your stuff.' }],
+          elseBlocks: [{
+            id: blockId(), type: 'if-then', condVar: 'quiz_score', condOp: '>=', condVal: '4',
+            thenBlocks: [{ id: blockId(), type: 'set-var', varName: 'quiz_result_message', value: 'Not bad! But you can do better. Try again!' }],
+            elseBlocks: [{ id: blockId(), type: 'set-var', varName: 'quiz_result_message', value: 'Better luck next time! Keep studying.' }],
+          }],
+        }],
+      },
+      { id: blockId(), type: 'set-text', elLabel: 'quiz-result-message', textValue: '{quiz_result_message}' },
+    ]
+    const quizTxt = (content, x, y, w, h, size = 28, color = '#ffffff', elLabel = '', weight = '700') => ({
+      ...makeElem('text', x, y, w, h),
+      content, size, color, elLabel,
+      font: 'Rajdhani', weight, align: 'center', vAlign: 'middle', shadow: true,
+    })
+    const progressBar = (qNum) => [
+      { ...makeElem('text', 62, 134, 900, 12), content: '', bgOn: true, bgColor: '#18324c', locked: true },
+      { ...makeElem('text', 62, 134, Math.round(900 * ((qNum - 1) / qTotal)), 12), content: '', bgOn: true, bgColor: '#4f46e5', locked: true },
+    ]
+    const optionButton = (label, x, y, qNum, isCorrect, correctAnswer) => ({
+      ...makeElem('button', x, y, 420, 74),
+      label,
+      action: 'script',
+      script: answerScript(qNum, label.replace(/^[A-D]\.\s*/, ''), correctAnswer),
+      quizAnswerCorrect: !!isCorrect,
+      bgColor: '#f9fafb', fgColor: '#1f2937', borderColor: '#c7d2fe', borderWidth: 2,
+      radius: '8px', bevel: false, fontSize: 16, font: 'Rajdhani', fontWeight: '700',
+    })
+    const startPage = {
+      ...makePage('Quiz Start'), templateId: 'quiz', bgColor: '#111827',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: resetScript,
+      elements: [
+        quizTxt('General Knowledge Quiz', 92, 90, 840, 70, 44, '#c7d2fe'),
+        quizTxt('10 editable questions with FluxAura Fuse scoring logic.', 122, 180, 780, 45, 20, '#d0e8ff', '', '500'),
+        quizTxt('Edit question text on each page, edit answer button labels, and open FluxAura Fuse on buttons/results to customize scoring.', 102, 230, 820, 70, 17, '#8fb7d8', '', '500'),
+        { ...navBtn('Start Quiz', 412, 340, 'goto', 'Question 1'), w: 200, h: 58, bgColor: '#4f46e5', fgColor: '#ffffff', borderColor: '#818cf8', radius: '8px', fontSize: 18 },
+      ],
+    }
+    const qPages = questions.map((q, qi) => {
+      const qNum = qi + 1
       const labels = ['A', 'B', 'C', 'D']
-      const xs = [62, 562], ys = [340, 440]
+      const xs = [62, 542], ys = [320, 420]
       return {
-        ...makePage(name), bgColor: '#0a1f3a',
+        ...makePage(`Question ${qNum}`), templateId: 'quiz', bgColor: '#0f172a',
+        timing: { mode: 'none', duration: 0, ms: 0 },
         elements: [
-          txt('Question', 40, 30, 200, 40, 16, '#6090c0'),
-          txt(qtext, 40, 70, 944, 80, 26, '#ffffff'),
-          ...opts.map((o, i) => ({
-            ...makeElem('button', xs[i % 2], ys[Math.floor(i / 2)], 420, 70),
-            label: `${labels[i]}. ${o.label}`,
-            action: 'goto', target: o.correct ? correctTarget : 'Wrong Answer',
-            bgColor: '#0d2240', fgColor: light, borderColor: '#305080', borderWidth: 2,
-            radius: '4px', bevel: false, fontSize: 15, font: 'Rajdhani', fontWeight: '600',
-          })),
+          quizTxt(`Question ${qNum} of ${qTotal}`, 62, 56, 900, 34, 18, '#93c5fd', `quiz-progress-${qNum}`),
+          ...progressBar(qNum),
+          quizTxt(q.question, 82, 170, 860, 95, 31, '#ffffff', `quiz-question-${qNum}`),
+          ...q.options.map((opt, i) => optionButton(`${labels[i]}. ${opt}`, xs[i % 2], ys[Math.floor(i / 2)], qNum, opt === q.answer, q.answer)),
         ],
       }
-    }
-    const correct = { ...makePage('Correct!'), bgColor: '#0a2a10',
+    })
+    const correctPage = (q, qNum) => ({
+      ...makePage(`Correct Answer ${qNum}`), templateId: 'quiz', bgColor: '#052e16',
+      timing: { mode: 'none', duration: 0, ms: 0 },
       elements: [
-        txt('✓ Correct!', 200, 260, 624, 100, 56, '#40d060'),
-        bodyTxt('Well done! You got the right answer.', 200, 370, 624, 50),
-        navBtn('Next Question', 312, 500, 'next'),
+        quizTxt('Correct Answer', 112, 120, 800, 70, 48, '#86efac'),
+        quizTxt(`Nice work. "${q.answer}" is correct.`, 132, 230, 760, 70, 24, '#d1fae5', '', '600'),
+        quizTxt('Score updated. Continue when ready.', 182, 320, 660, 45, 18, '#8fd8b0', '', '500'),
+        { ...navBtn(qNum < qTotal ? 'Next Question' : 'Show Results', 312, 450, 'goto', qNum < qTotal ? `Question ${qNum + 1}` : 'Quiz Results'), w: 240, h: 56, bgColor: '#16a34a', fgColor: '#ffffff', borderColor: '#86efac', radius: '8px', fontSize: 18 },
+      ],
+    })
+    const incorrectPage = (q, qNum) => ({
+      ...makePage(`Incorrect Answer ${qNum}`), templateId: 'quiz', bgColor: '#3a0a16',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      elements: [
+        quizTxt('Incorrect Answer', 112, 120, 800, 70, 48, '#fca5a5'),
+        quizTxt('That was not quite right.', 132, 230, 760, 50, 24, '#fee2e2', '', '600'),
+        quizTxt('Your incorrect attempt was recorded. Try this question again.', 142, 300, 740, 58, 18, '#f0b8b8', '', '500'),
+        { ...navBtn('Repeat Question', 312, 450, 'goto', `Question ${qNum}`), w: 240, h: 56, bgColor: '#dc2626', fgColor: '#ffffff', borderColor: '#fca5a5', radius: '8px', fontSize: 18 },
+      ],
+    })
+    const quizFlowPages = qPages.flatMap((page, idx) => [page, correctPage(questions[idx], idx + 1), incorrectPage(questions[idx], idx + 1)])
+    const resultsPage = {
+      ...makePage('Quiz Results'), templateId: 'quiz', bgColor: '#102018',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: resultsScript,
+      elements: [
+        quizTxt('Your Quiz Results', 112, 80, 800, 60, 42, '#bbf7d0'),
+        { ...makeElem('text', 442, 180, 140, 140), content: '', bgOn: true, bgColor: '#dcfce7', locked: true },
+        quizTxt('0/10', 442, 218, 140, 64, 40, '#166534', 'quiz-score-text'),
+        quizTxt('Incorrect attempts: 0', 242, 318, 540, 40, 20, '#fca5a5', 'quiz-wrong-text', '600'),
+        quizTxt('', 182, 374, 660, 74, 24, '#d0e8ff', 'quiz-result-message', '600'),
+        { ...navBtn('Restart Quiz', 312, 500, 'goto', 'Quiz Start'), w: 200, h: 56, bgColor: '#4f46e5', fgColor: '#ffffff', borderColor: '#818cf8', radius: '8px', fontSize: 18 },
       ],
     }
-    const wrong = { ...makePage('Wrong Answer'), bgColor: '#2a0a10',
-      elements: [
-        txt('✗ Try Again', 200, 260, 624, 100, 56, '#e04040'),
-        bodyTxt('That was not quite right. Review the question and try again.', 200, 370, 624, 60),
-        navBtn('‹ Back', 312, 500, 'prev'),
-      ],
-    }
-    const q1 = question('Question 1', 'What is the capital of France?',
-      [{ label: 'London', correct: false }, { label: 'Paris', correct: true }, { label: 'Berlin', correct: false }, { label: 'Madrid', correct: false }],
-      'Correct!'
-    )
-    const q2 = question('Question 2', 'How many sides does a hexagon have?',
-      [{ label: 'Five', correct: false }, { label: 'Seven', correct: false }, { label: 'Six', correct: true }, { label: 'Eight', correct: false }],
-      'Correct!'
-    )
-    return [q1, correct, wrong, q2]
+    return [startPage, ...quizFlowPages, resultsPage]
   }
 
   /* ── Interactive Puzzle ── */
   if (id === 'puzzle') {
+    const blockId = () => `_${Math.random().toString(36).slice(2, 8)}`
+    const puzzleTxt = (content, x, y, w, h, size = 28, color = '#ffffff', elLabel = '', weight = '700') => ({
+      ...makeElem('text', x, y, w, h),
+      content, size, color, elLabel,
+      font: 'Rajdhani', weight, align: 'center', vAlign: 'middle', shadow: true,
+    })
+    const panel = (x, y, w, h, color = '#111827', border = '#64748b', elLabel = '') => ({
+      ...makeElem('text', x, y, w, h),
+      content: '', elLabel, bgOn: true, bgColor: color, borderColor: border, borderWidth: 2, radius: '8px',
+    })
+    const setText = (elLabel, textValue) => ({ id: blockId(), type: 'set-text', elLabel, textValue })
+    const setVar = (varName, value) => ({ id: blockId(), type: 'set-var', varName, value })
+    const changeVar = (varName, op, amount) => ({ id: blockId(), type: 'change-var', varName, op, amount })
+    const goTo = (targetPage) => ({ id: blockId(), type: 'go-to', targetPage })
+    const ifThen = (condVar, condOp, condVal, thenBlocks = [], elseBlocks = []) => ({
+      id: blockId(), type: 'if-then', condVar, condOp, condVal, thenBlocks, elseBlocks,
+    })
+    const resetPuzzleScript = [
+      setVar('puzzle_dial_1', '0'),
+      setVar('puzzle_dial_2', '0'),
+      setVar('puzzle_dial_3', '0'),
+      setVar('puzzle_attempts', '0'),
+      setVar('puzzle_score', '0'),
+      setVar('puzzle_code', '123'),
+      setVar('puzzle_guess', '000'),
+      setVar('puzzle_feedback', 'Set the brass dials, then pull the lever.'),
+      { id: blockId(), type: 'file-read-int', handleVar: 'fluxaura_puzzle_best', varName: 'puzzle_best' },
+    ]
+    const refreshLockText = [
+      setText('puzzle-dial-1', '{puzzle_dial_1}'),
+      setText('puzzle-dial-2', '{puzzle_dial_2}'),
+      setText('puzzle-dial-3', '{puzzle_dial_3}'),
+      setText('puzzle-guess-text', '{puzzle_guess}'),
+      setText('puzzle-attempts-text', 'Attempts: {puzzle_attempts}'),
+      setText('puzzle-best-text', 'Best: {puzzle_best}'),
+      setText('puzzle-feedback', '{puzzle_feedback}'),
+    ]
+    const dialScript = (dialNum, op) => {
+      const varName = `puzzle_dial_${dialNum}`
+      return [
+        changeVar(varName, op, '1'),
+        ifThen(varName, '>', '9', [setVar(varName, '0')], [
+          ifThen(varName, '<', '0', [setVar(varName, '9')]),
+        ]),
+        setText(`puzzle-dial-${dialNum}`, `{${varName}}`),
+        { id: blockId(), type: 'string-set', varName: 'puzzle_guess', template: '{puzzle_dial_1}{puzzle_dial_2}{puzzle_dial_3}' },
+        setText('puzzle-guess-text', '{puzzle_guess}'),
+      ]
+    }
+    const scoreBlocks = [
+      setVar('puzzle_score', '60'),
+      ifThen('puzzle_attempts', '<=', '1', [setVar('puzzle_score', '100')], [
+        ifThen('puzzle_attempts', '<=', '2', [setVar('puzzle_score', '90')], [
+          ifThen('puzzle_attempts', '<=', '3', [setVar('puzzle_score', '80')], [
+            ifThen('puzzle_attempts', '<=', '4', [setVar('puzzle_score', '70')]),
+          ]),
+        ]),
+      ]),
+    ]
+    const submitScript = [
+      changeVar('puzzle_attempts', '+', '1'),
+      { id: blockId(), type: 'string-set', varName: 'puzzle_guess', template: '{puzzle_dial_1}{puzzle_dial_2}{puzzle_dial_3}' },
+      setText('puzzle-attempts-text', 'Attempts: {puzzle_attempts}'),
+      setText('puzzle-guess-text', '{puzzle_guess}'),
+      ifThen('puzzle_guess', '==', 'puzzle_code', [
+        ...scoreBlocks,
+        setVar('puzzle_feedback', 'Click! The heavy brass mechanism turns and the iron door swings open.'),
+        ifThen('puzzle_score', '>', 'puzzle_best', [
+          setVar('puzzle_best', 'puzzle_score'),
+          { id: blockId(), type: 'file-write-int', handleVar: 'fluxaura_puzzle_best', writeVar: 'puzzle_score' },
+        ]),
+        goTo('Vault Open'),
+      ], [
+        ifThen('puzzle_attempts', '==', '1', [
+          setVar('puzzle_feedback', "The lock doesn't budge. Try reviewing the wall riddle again."),
+        ], [
+          ifThen('puzzle_attempts', '==', '2', [
+            setVar('puzzle_feedback', "Still locked. Hint: think of 12:00, then 1, 2, 3."),
+          ], [
+            setVar('puzzle_feedback', 'Incorrect. Hint: the code starts with 1, and 1 is half of the second number.'),
+          ]),
+        ]),
+        setText('puzzle-feedback', '{puzzle_feedback}'),
+      ]),
+    ]
+    const startBtn = {
+      ...navBtn('Start Puzzle', 392, 546, 'script'),
+      w: 240, h: 58, bgColor: '#b7791f', fgColor: '#fff7d6', borderColor: '#fde68a',
+      script: [...resetPuzzleScript, goTo('Vault Lock')],
+    }
     const intro = {
-      ...makePage('Puzzle Intro'), bgColor: '#0a1a3a',
+      ...makePage('Puzzle Intro'), templateId: 'puzzle', bgColor: '#111827',
+      timing: { mode: 'none', duration: 0, ms: 0 },
       elements: [
-        txt('🧩 Matching Puzzle', 112, 80, 800, 80, 42, acc),
-        bodyTxt('Match each item on the left to its pair on the right.\nClick the buttons in order to make your selections.', 112, 180, 800, 80),
-        navBtn('Start Puzzle ›', 312, 460, 'next'),
+        puzzleTxt('Vault Combination Puzzle', 82, 64, 860, 70, 44, '#fbbf24'),
+        puzzleTxt("The heavy iron door blocks your path. A brass lock glints in the dim light.", 122, 150, 780, 44, 20, '#dbeafe', '', '500'),
+        puzzleTxt("Riddle: The first is half of the second. The third is the sum of the first two. Together, they form the countdown to midnight.", 122, 228, 780, 92, 22, '#fde68a', 'puzzle-riddle', '600'),
+        puzzleTxt('Editable FluxAura Fuse variables: dials, attempts, current guess, score, best score, and feedback.', 142, 374, 740, 54, 17, '#93c5fd', '', '500'),
+        startBtn,
       ],
     }
     const puzzle = {
-      ...makePage('Puzzle 1'), bgColor: '#0a1a3a',
+      ...makePage('Vault Lock'), templateId: 'puzzle', bgColor: '#0f172a',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: refreshLockText,
       elements: [
-        txt('Match the pairs', 40, 30, 944, 60, 28, acc),
-        ...['Item A','Item B','Item C'].map((lbl, i) => ({
-          ...makeElem('button', 50, 120 + i * 100, 300, 70),
-          label: lbl, action: 'next',
-          bgColor: '#1a3a5c', fgColor: light, borderColor: '#4a8fc0', borderWidth: 2,
-          radius: '4px', bevel: true, fontSize: 14, font: 'Rajdhani', fontWeight: '600',
-        })),
-        ...['Match 1','Match 2','Match 3'].map((lbl, i) => ({
-          ...makeElem('button', 620, 120 + i * 100, 300, 70),
-          label: lbl, action: 'next',
-          bgColor: '#1a2a40', fgColor: '#80b0d0', borderColor: '#305070', borderWidth: 2,
-          radius: '4px', bevel: false, fontSize: 14, font: 'Rajdhani', fontWeight: '600',
-        })),
-        navBtn('Check Answer ›', 312, 640, 'next'),
+        puzzleTxt('Vault Lock', 62, 32, 900, 48, 32, '#fbbf24'),
+        panel(242, 104, 540, 330, '#111827', '#94a3b8', 'puzzle-door-panel'),
+        panel(332, 154, 360, 170, '#27272a', '#d6a64a', 'puzzle-lock-panel'),
+        puzzleTxt('CURRENT CODE', 392, 126, 240, 30, 15, '#93c5fd', '', '600'),
+        puzzleTxt('000', 392, 330, 240, 42, 30, '#fef3c7', 'puzzle-guess-text'),
+        ...[1, 2, 3].flatMap((dial, i) => {
+          const x = 382 + i * 90
+          return [
+            { ...makeElem('button', x, 166, 68, 40), label: '▲', action: 'script', script: dialScript(dial, '+'), bgColor: '#1e3a5f', fgColor: '#bfdbfe', borderColor: '#60a5fa', borderWidth: 2, radius: '6px', fontSize: 20, font: 'Rajdhani', fontWeight: '700' },
+            puzzleTxt('0', x, 212, 68, 58, 42, '#ffffff', `puzzle-dial-${dial}`),
+            { ...makeElem('button', x, 276, 68, 40), label: '▼', action: 'script', script: dialScript(dial, '-'), bgColor: '#1e3a5f', fgColor: '#bfdbfe', borderColor: '#60a5fa', borderWidth: 2, radius: '6px', fontSize: 20, font: 'Rajdhani', fontWeight: '700' },
+          ]
+        }),
+        puzzleTxt('Attempts: 0', 82, 458, 250, 34, 20, '#bfdbfe', 'puzzle-attempts-text', '600'),
+        puzzleTxt('Best: 0', 692, 458, 250, 34, 20, '#fbbf24', 'puzzle-best-text', '600'),
+        puzzleTxt('Set the brass dials, then pull the lever.', 132, 512, 760, 64, 22, '#fef3c7', 'puzzle-feedback', '600'),
+        { ...navBtn('Pull Lever', 392, 608, 'script'), w: 240, h: 58, bgColor: '#b91c1c', fgColor: '#ffffff', borderColor: '#fecaca', radius: '8px', fontSize: 20, script: submitScript },
+        { ...navBtn('Reset Puzzle', 62, 642, 'goto', 'Puzzle Intro'), w: 180, h: 42, bgColor: '#1f2937', fgColor: '#dbeafe', borderColor: '#64748b' },
       ],
     }
     const reveal = {
-      ...makePage('Answer Reveal'), bgColor: '#0a2a10',
+      ...makePage('Vault Open'), templateId: 'puzzle', bgColor: '#052e16',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: [
+        setText('puzzle-win-score', 'Score: {puzzle_score}'),
+        setText('puzzle-win-attempts', 'Solved in {puzzle_attempts} attempt(s)'),
+        setText('puzzle-win-best', 'Best saved score: {puzzle_best}'),
+      ],
       elements: [
-        txt('✓ Answers', 112, 80, 800, 80, 42, '#40d060'),
-        bodyTxt('Item A → Match 1\nItem B → Match 2\nItem C → Match 3', 112, 180, 800, 120),
-        navBtn('Play Again', 312, 520, 'goto', 'Puzzle 1'),
-        navBtn('‹ Intro', 112, 520, 'goto', 'Puzzle Intro'),
+        puzzleTxt('Winner', 112, 90, 800, 78, 58, '#86efac'),
+        puzzleTxt('Click! The heavy brass mechanism turns. The iron door slowly swings open, revealing the path forward.', 142, 204, 740, 80, 25, '#d1fae5', 'puzzle-win-message', '600'),
+        puzzleTxt('Score: 0', 312, 328, 400, 42, 28, '#fef08a', 'puzzle-win-score'),
+        puzzleTxt('Solved in 0 attempt(s)', 312, 382, 400, 36, 22, '#bbf7d0', 'puzzle-win-attempts', '600'),
+        puzzleTxt('Best saved score: 0', 312, 430, 400, 36, 22, '#fbbf24', 'puzzle-win-best', '600'),
+        { ...navBtn('Play Again', 312, 540, 'goto', 'Puzzle Intro'), w: 200, h: 54, bgColor: '#16a34a', fgColor: '#ffffff', borderColor: '#86efac', radius: '8px', fontSize: 18 },
+        { ...navBtn('Quit', 532, 540, 'quit'), w: 160, h: 54, bgColor: '#1f2937', fgColor: '#dbeafe', borderColor: '#64748b', radius: '8px', fontSize: 18 },
       ],
     }
     return [intro, puzzle, reveal]
   }
 
+  /* ── Maze Game ── */
+  if (id === 'maze-game') {
+    const blockId = () => `_${Math.random().toString(36).slice(2, 8)}`
+    const levels = [
+      {
+        name: 'Level 1: Easy',
+        map: [
+          [1,1,1,1,1],
+          [1,2,0,0,1],
+          [1,1,1,0,1],
+          [1,0,0,0,3],
+          [1,1,1,1,1],
+        ],
+      },
+      {
+        name: 'Level 2: Medium',
+        map: [
+          [1,1,1,1,1,1,1],
+          [1,2,0,1,0,0,1],
+          [1,1,0,1,0,1,1],
+          [1,0,0,0,0,0,1],
+          [1,0,1,1,1,0,1],
+          [1,0,0,0,1,0,3],
+          [1,1,1,1,1,1,1],
+        ],
+      },
+      {
+        name: 'Level 3: Hard',
+        map: [
+          [1,1,1,1,1,1,1,1,1],
+          [1,2,0,0,0,1,0,0,1],
+          [1,1,1,1,0,1,0,1,1],
+          [1,0,0,0,0,0,0,0,1],
+          [1,0,1,1,1,1,1,0,1],
+          [1,0,1,0,0,0,1,0,1],
+          [1,0,1,0,1,0,0,0,1],
+          [1,0,0,0,1,1,1,0,3],
+          [1,1,1,1,1,1,1,1,1],
+        ],
+      },
+    ]
+    const gameTxt = (content, x, y, w, h, size = 28, color = '#ffffff', elLabel = '', weight = '700') => ({
+      ...makeElem('text', x, y, w, h),
+      content, size, color, elLabel,
+      font: 'Rajdhani', weight, align: 'center', vAlign: 'middle', shadow: true,
+    })
+    const setVar = (varName, value) => ({ id: blockId(), type: 'set-var', varName, value })
+    const changeVar = (varName, op, amount) => ({ id: blockId(), type: 'change-var', varName, op, amount })
+    const setText = (elLabel, textValue) => ({ id: blockId(), type: 'set-text', elLabel, textValue })
+    const showEl = (elLabel) => ({ id: blockId(), type: 'show-el', elLabel })
+    const hideEl = (elLabel) => ({ id: blockId(), type: 'hide-el', elLabel })
+    const goTo = (targetPage) => ({ id: blockId(), type: 'go-to', targetPage })
+    const ifThen = (condVar, condOp, condVal, thenBlocks = [], elseBlocks = [], condVar2 = '', condOp2 = '==', condVal2 = '', condLogic = '') => ({
+      id: blockId(), type: 'if-then', condVar, condOp, condVal, thenBlocks, elseBlocks,
+      ...(condLogic ? { condLogic, condVar2, condOp2, condVal2 } : {}),
+    })
+    const posKey = (r, c) => `${r}_${c}`
+    const findStart = (map) => {
+      for (let r = 0; r < map.length; r++) {
+        for (let c = 0; c < map[r].length; c++) if (map[r][c] === 2) return { r, c }
+      }
+      return { r: 1, c: 1 }
+    }
+    const findGoal = (map) => {
+      for (let r = 0; r < map.length; r++) {
+        for (let c = 0; c < map[r].length; c++) if (map[r][c] === 3) return { r, c }
+      }
+      return { r: 1, c: 1 }
+    }
+    const passableCells = (map) => {
+      const cells = []
+      for (let r = 0; r < map.length; r++) {
+        for (let c = 0; c < map[r].length; c++) if (map[r][c] !== 1) cells.push({ r, c })
+      }
+      return cells
+    }
+    const refreshHud = [
+      setText('maze-moves-text', 'Moves: {maze_moves}'),
+      setText('maze-score-text', 'Score: {maze_score}'),
+      setText('maze-best-text', 'Best: {maze_best}'),
+      setText('maze-status-text', '{maze_status}'),
+    ]
+    const resetRunScript = [
+      setVar('maze_level', '1'),
+      setVar('maze_moves', '0'),
+      setVar('maze_score', '300'),
+      setVar('maze_status', 'Reach each green exit. Every move lowers the score by 1.'),
+      { id: blockId(), type: 'file-read-int', handleVar: 'fluxaura_maze_best', varName: 'maze_best' },
+      ...refreshHud,
+      goTo('Maze Level 1'),
+    ]
+    const levelStartScript = (levelIndex) => {
+      const start = findStart(levels[levelIndex].map)
+      const levelNum = levelIndex + 1
+      return [
+        setVar('maze_level', String(levelNum)),
+        setVar('maze_pos', posKey(start.r, start.c)),
+        setVar('maze_moved', '0'),
+        setVar('maze_status', levels[levelIndex].name),
+        ...passableCells(levels[levelIndex].map).flatMap(({ r, c }) => [
+          setText(`maze-player-${levelNum}-${r}-${c}`, '{maze_player}'),
+          hideEl(`maze-player-${levelNum}-${r}-${c}`),
+        ]),
+        showEl(`maze-player-${levelNum}-${start.r}-${start.c}`),
+        ...refreshHud,
+      ]
+    }
+    const winBlocks = [
+      setVar('maze_status', 'Winner! You solved all three maze levels.'),
+      ifThen('maze_score', '>', 'maze_best', [
+        setVar('maze_best', 'maze_score'),
+        { id: blockId(), type: 'file-write-int', handleVar: 'fluxaura_maze_best', writeVar: 'maze_score' },
+      ]),
+      goTo('Maze Winner'),
+    ]
+    const moveScript = (levelIndex, dr, dc) => {
+      const map = levels[levelIndex].map
+      const levelNum = levelIndex + 1
+      const goal = findGoal(map)
+      const blocks = [setVar('maze_moved', '0')]
+      for (const { r, c } of passableCells(map)) {
+        const nr = r + dr
+        const nc = c + dc
+        if (!map[nr] || map[nr][nc] === undefined || map[nr][nc] === 1) continue
+        const reachedGoal = nr === goal.r && nc === goal.c
+        const nextPage = levelIndex < levels.length - 1 ? `Maze Level ${levelNum + 1}` : ''
+        blocks.push(ifThen('maze_pos', '==', posKey(r, c), [
+          hideEl(`maze-player-${levelNum}-${r}-${c}`),
+          showEl(`maze-player-${levelNum}-${nr}-${nc}`),
+          setVar('maze_pos', posKey(nr, nc)),
+          setVar('maze_moved', '1'),
+          changeVar('maze_moves', '+', '1'),
+          changeVar('maze_score', '-', '1'),
+          setVar('maze_status', reachedGoal
+            ? (nextPage ? `Level ${levelNum} clear. Loading Level ${levelNum + 1}.` : 'Final exit reached.')
+            : 'Keep going. Reach the green exit.'),
+          ...refreshHud,
+          ...(reachedGoal
+            ? (nextPage ? [{ id: blockId(), type: 'wait-sec', seconds: '0.45' }, goTo(nextPage)] : winBlocks)
+            : []),
+        ], [], 'maze_moved', '==', '0', 'AND'))
+      }
+      return blocks
+    }
+    const charButton = (label, value, x) => ({
+      ...makeElem('button', x, 250, 120, 84),
+      label, action: 'script',
+      script: [
+        setVar('maze_player', value),
+        setText('maze-current-player', `Current explorer: ${value}`),
+      ],
+      bgColor: '#0f766e', fgColor: '#ffffff', borderColor: '#5eead4', borderWidth: 2,
+      radius: '8px', bevel: false, fontSize: 36, font: 'Rajdhani', fontWeight: '700',
+    })
+    const setupPage = {
+      ...makePage('Maze Setup'), templateId: 'maze-game', bgColor: '#1f2937',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      elements: [
+        gameTxt('Maze Adventure', 112, 70, 800, 72, 48, '#fbbf24'),
+        gameTxt('Choose an explorer, then guide them through three editable maze levels.', 122, 155, 780, 48, 21, '#dbeafe', '', '500'),
+        charButton('@', '@', 272),
+        charButton('A', 'A', 452),
+        charButton('*', '*', 632),
+        gameTxt('Current explorer: @', 262, 360, 500, 38, 22, '#99f6e4', 'maze-current-player', '600'),
+        gameTxt('Tip: edit the maze_player variable or button scripts to use your own letter/symbol.', 142, 410, 740, 42, 17, '#93c5fd', '', '500'),
+        { ...navBtn('Start Maze', 392, 540, 'script'), w: 240, h: 58, bgColor: '#ea580c', fgColor: '#ffffff', borderColor: '#fed7aa', radius: '8px', fontSize: 20, script: resetRunScript },
+      ],
+    }
+    const levelPage = (levelIndex) => {
+      const levelNum = levelIndex + 1
+      const map = levels[levelIndex].map
+      const cell = 44
+      const boardW = map[0].length * cell
+      const boardH = map.length * cell
+      const x0 = Math.round((1024 - boardW) / 2)
+      const y0 = 142
+      const cellElements = []
+      for (let r = 0; r < map.length; r++) {
+        for (let c = 0; c < map[r].length; c++) {
+          const type = map[r][c]
+          const isWall = type === 1
+          const isGoal = type === 3
+          cellElements.push({
+            ...makeElem('text', x0 + c * cell, y0 + r * cell, cell, cell),
+            content: isGoal ? 'EXIT' : '',
+            elLabel: `maze-cell-${levelNum}-${r}-${c}`,
+            bgOn: true,
+            bgColor: isWall ? '#475569' : isGoal ? '#16a34a' : '#0f172a',
+            borderColor: '#334155', borderWidth: 1, radius: '2px',
+            color: '#dcfce7', size: 12, font: 'Rajdhani', weight: '700', align: 'center', vAlign: 'middle',
+            locked: true,
+          })
+          if (!isWall) {
+            cellElements.push({
+              ...makeElem('text', x0 + c * cell + 2, y0 + r * cell + 2, cell - 4, cell - 4),
+              content: '@',
+              elLabel: `maze-player-${levelNum}-${r}-${c}`,
+              size: 26, color: '#fbbf24', font: 'Rajdhani', weight: '800', align: 'center', vAlign: 'middle',
+              bgOn: false, visible: false, locked: true, z: 50 + r * map[r].length + c,
+            })
+          }
+        }
+      }
+      return {
+        ...makePage(`Maze Level ${levelNum}`), templateId: 'maze-game', bgColor: '#020617',
+        timing: { mode: 'none', duration: 0, ms: 0 },
+        onStartScript: levelStartScript(levelIndex),
+        keyBindings: [
+          { id: blockId(), label: 'Move Up', key: 'ArrowUp', script: moveScript(levelIndex, -1, 0), enabled: true },
+          { id: blockId(), label: 'Move Up (W)', key: 'w', script: moveScript(levelIndex, -1, 0), enabled: true },
+          { id: blockId(), label: 'Move Down', key: 'ArrowDown', script: moveScript(levelIndex, 1, 0), enabled: true },
+          { id: blockId(), label: 'Move Down (S)', key: 's', script: moveScript(levelIndex, 1, 0), enabled: true },
+          { id: blockId(), label: 'Move Left', key: 'ArrowLeft', script: moveScript(levelIndex, 0, -1), enabled: true },
+          { id: blockId(), label: 'Move Left (A)', key: 'a', script: moveScript(levelIndex, 0, -1), enabled: true },
+          { id: blockId(), label: 'Move Right', key: 'ArrowRight', script: moveScript(levelIndex, 0, 1), enabled: true },
+          { id: blockId(), label: 'Move Right (D)', key: 'd', script: moveScript(levelIndex, 0, 1), enabled: true },
+        ],
+        elements: [
+          gameTxt(levels[levelIndex].name, 62, 32, 900, 44, 30, '#fbbf24'),
+          gameTxt('Moves: 0', 82, 88, 220, 34, 20, '#bfdbfe', 'maze-moves-text', '600'),
+          gameTxt('Score: 300', 402, 88, 220, 34, 20, '#fde68a', 'maze-score-text', '600'),
+          gameTxt('Best: 0', 722, 88, 220, 34, 20, '#86efac', 'maze-best-text', '600'),
+          ...cellElements,
+          gameTxt('Reach each green exit. Every move lowers the score by 1.', 142, 560, 740, 40, 20, '#dbeafe', 'maze-status-text', '600'),
+          { ...makeElem('button', 472, 610, 80, 46), label: 'UP', action: 'script', script: moveScript(levelIndex, -1, 0), bgColor: '#ea580c', fgColor: '#ffffff', borderColor: '#fed7aa', borderWidth: 2, radius: '8px', fontSize: 16, font: 'Rajdhani', fontWeight: '700' },
+          { ...makeElem('button', 382, 664, 80, 46), label: 'LEFT', action: 'script', script: moveScript(levelIndex, 0, -1), bgColor: '#ea580c', fgColor: '#ffffff', borderColor: '#fed7aa', borderWidth: 2, radius: '8px', fontSize: 15, font: 'Rajdhani', fontWeight: '700' },
+          { ...makeElem('button', 472, 664, 80, 46), label: 'DOWN', action: 'script', script: moveScript(levelIndex, 1, 0), bgColor: '#ea580c', fgColor: '#ffffff', borderColor: '#fed7aa', borderWidth: 2, radius: '8px', fontSize: 15, font: 'Rajdhani', fontWeight: '700' },
+          { ...makeElem('button', 562, 664, 80, 46), label: 'RIGHT', action: 'script', script: moveScript(levelIndex, 0, 1), bgColor: '#ea580c', fgColor: '#ffffff', borderColor: '#fed7aa', borderWidth: 2, radius: '8px', fontSize: 15, font: 'Rajdhani', fontWeight: '700' },
+          { ...navBtn('Restart', 62, 654, 'goto', 'Maze Setup'), w: 150, h: 46, bgColor: '#1f2937', fgColor: '#dbeafe', borderColor: '#64748b' },
+        ],
+      }
+    }
+    const winnerPage = {
+      ...makePage('Maze Winner'), templateId: 'maze-game', bgColor: '#052e16',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: [
+        setText('maze-final-score', 'Final score: {maze_score}'),
+        setText('maze-final-moves', 'Total moves: {maze_moves}'),
+        setText('maze-final-best', 'Best saved score: {maze_best}'),
+      ],
+      elements: [
+        gameTxt('Maze Winner', 112, 90, 800, 78, 58, '#86efac'),
+        gameTxt('You solved all three mazes and proved your logic skills.', 142, 205, 740, 58, 26, '#d1fae5', '', '600'),
+        gameTxt('Final score: 300', 312, 330, 400, 42, 28, '#fef08a', 'maze-final-score'),
+        gameTxt('Total moves: 0', 312, 385, 400, 36, 22, '#bbf7d0', 'maze-final-moves', '600'),
+        gameTxt('Best saved score: 0', 312, 432, 400, 36, 22, '#fbbf24', 'maze-final-best', '600'),
+        { ...navBtn('Play Again', 312, 540, 'goto', 'Maze Setup'), w: 200, h: 54, bgColor: '#16a34a', fgColor: '#ffffff', borderColor: '#86efac', radius: '8px', fontSize: 18 },
+        { ...navBtn('Quit', 532, 540, 'quit'), w: 160, h: 54, bgColor: '#1f2937', fgColor: '#dbeafe', borderColor: '#64748b', radius: '8px', fontSize: 18 },
+      ],
+    }
+    return [setupPage, ...levels.map((_, levelIndex) => levelPage(levelIndex)), winnerPage]
+  }
+
   /* ── Lesson / Tutorial ── */
   if (id === 'lesson') {
-    const step = (name, num, headline, body) => ({
-      ...makePage(name), bgColor: num % 2 === 0 ? '#0a1a2a' : '#0f1a30',
+    const blockId = () => `_${Math.random().toString(36).slice(2, 8)}`
+    const lessonTxt = (content, x, y, w, h, size = 28, color = '#ffffff', elLabel = '', weight = '700') => ({
+      ...makeElem('text', x, y, w, h),
+      content, size, color, elLabel,
+      font: 'Rajdhani', weight, align: 'center', vAlign: 'middle', shadow: true,
+    })
+    const setVar = (varName, value) => ({ id: blockId(), type: 'set-var', varName, value })
+    const changeVar = (varName, op, amount) => ({ id: blockId(), type: 'change-var', varName, op, amount })
+    const setText = (elLabel, textValue) => ({ id: blockId(), type: 'set-text', elLabel, textValue })
+    const goTo = (targetPage) => ({ id: blockId(), type: 'go-to', targetPage })
+    const ifThen = (condVar, condOp, condVal, thenBlocks = [], elseBlocks = []) => ({
+      id: blockId(), type: 'if-then', condVar, condOp, condVal, thenBlocks, elseBlocks,
+    })
+    const resetScript = [
+      setVar('lesson_progress', '0'),
+      setVar('lesson_score', '0'),
+      setVar('lesson_wrong', '0'),
+      setVar('lesson_complete', '0'),
+      setVar('lesson_feedback', 'Start the lesson and complete the checkpoints.'),
+      { id: blockId(), type: 'file-read-int', handleVar: 'fluxaura_lesson_best', varName: 'lesson_best' },
+      goTo('Lesson Step 1'),
+    ]
+    const progressScript = (pct, feedback = '') => [
+      setVar('lesson_progress', String(pct)),
+      ...(feedback ? [setVar('lesson_feedback', feedback)] : []),
+      setText('lesson-progress-text', 'Progress: {lesson_progress}%'),
+      setText('lesson-score-text', 'Score: {lesson_score}'),
+      setText('lesson-feedback-text', '{lesson_feedback}'),
+    ]
+    const checkpointScript = (correct, nextPage, retryPage, correctMsg = 'Correct. Continue to the next step.', incorrectMsg = 'Not quite. Review the step, then try again.') => correct ? [
+      changeVar('lesson_score', '+', '1'),
+      setVar('lesson_feedback', correctMsg),
+      goTo(nextPage),
+    ] : [
+      changeVar('lesson_wrong', '+', '1'),
+      setVar('lesson_feedback', incorrectMsg),
+      goTo(retryPage),
+    ]
+    const finishScript = [
+      setVar('lesson_complete', '1'),
+      setVar('lesson_progress', '100'),
+      ifThen('lesson_score', '>', 'lesson_best', [
+        setVar('lesson_best', 'lesson_score'),
+        { id: blockId(), type: 'file-write-int', handleVar: 'fluxaura_lesson_best', writeVar: 'lesson_score' },
+      ]),
+      goTo('Lesson Complete'),
+    ]
+    const hud = [
+      lessonTxt('Progress: 0%', 62, 32, 250, 32, 18, '#93c5fd', 'lesson-progress-text', '600'),
+      lessonTxt('Score: 0', 382, 32, 250, 32, 18, '#fde68a', 'lesson-score-text', '600'),
+      lessonTxt('Best: {lesson_best}', 702, 32, 250, 32, 18, '#86efac', 'lesson-best-text', '600'),
+    ]
+    const lessonItems = [
+      {
+        headline: 'Lesson Goal',
+        body: 'This template teaches a simple FluxAura Fuse workflow: set variables, show feedback, branch to the next page, and record a final score.',
+        question: 'What should a lesson objective describe?',
+        options: [
+          { label: 'What the learner should be able to do', correct: true },
+          { label: 'Only the background color of the page', correct: false },
+          { label: 'The file name of the project', correct: false },
+          { label: 'A random button label', correct: false },
+        ],
+        correctMsg: 'Correct. Objectives describe the learner outcome.',
+        incorrectMsg: 'Not quite. The objective should describe what the learner can do.',
+      },
+      {
+        headline: 'Variables Store State',
+        body: 'Fuse variables remember values while the lesson runs. This template uses progress, score, wrong attempts, completion, best score, and feedback variables.',
+        question: 'Which variable tracks correct checkpoint answers?',
+        options: [
+          { label: 'lesson_score', correct: true },
+          { label: 'lesson_wrong', correct: false },
+          { label: 'lesson_feedback', correct: false },
+          { label: 'lesson_progress', correct: false },
+        ],
+        correctMsg: 'Correct. lesson_score increases after a correct answer.',
+        incorrectMsg: 'Try again. lesson_score is the variable used for correct answers.',
+      },
+      {
+        headline: 'SET Text Updates The Page',
+        body: 'The lesson HUD is updated by SET text blocks. Progress, score, best score, and feedback are all refreshed from variables.',
+        statement: 'SET text can display variable values such as {lesson_score}.',
+        isCorrect: true,
+        correctMsg: 'Correct. SET text can place variable values inside visible text.',
+        incorrectMsg: 'Incorrect. SET text is exactly how this template displays variable values.',
+      },
+      {
+        headline: 'Branching Chooses A Path',
+        body: 'Answer buttons run Fuse scripts. Correct answers increase the score and continue; incorrect answers increase wrong attempts and send the learner back to review.',
+        question: 'What does the correct-answer script do first?',
+        options: [
+          { label: 'Adds 1 to lesson_score', correct: true },
+          { label: 'Deletes the current page', correct: false },
+          { label: 'Turns off all variables', correct: false },
+          { label: 'Publishes the project', correct: false },
+        ],
+        correctMsg: 'Correct. The script adds 1 to lesson_score before continuing.',
+        incorrectMsg: 'Not quite. Correct answers add 1 to lesson_score.',
+      },
+      {
+        headline: 'Feedback Guides The Learner',
+        body: 'Feedback messages tell the learner why an answer worked or what to review next. Clear feedback is part of the script, not just the design.',
+        question: 'Which variable stores checkpoint feedback messages?',
+        options: [
+          { label: 'lesson_feedback', correct: true },
+          { label: 'lesson_complete', correct: false },
+          { label: 'lesson_best', correct: false },
+          { label: 'lesson_progress', correct: false },
+        ],
+        correctMsg: 'Correct. lesson_feedback stores the message shown on lesson pages.',
+        incorrectMsg: 'Review the HUD. lesson_feedback stores the message shown to the learner.',
+      },
+      {
+        headline: 'Progress Is Intentional',
+        body: 'Progress should match where the learner is in the course. This template updates progress at each step so the HUD always reflects the current checkpoint.',
+        statement: 'Progress should only be updated on the final page.',
+        isCorrect: false,
+        correctMsg: 'Correct. That statement is incorrect; progress should update throughout the lesson.',
+        incorrectMsg: 'Incorrect. Progress should be updated throughout the lesson, not only at the end.',
+      },
+      {
+        headline: 'Best Score Persists',
+        body: 'The completion script compares lesson_score with lesson_best. If the new score is higher, it writes the new best score to persistent storage.',
+        question: 'When should lesson_best be updated?',
+        options: [
+          { label: 'When the current score beats the saved best', correct: true },
+          { label: 'After every wrong answer', correct: false },
+          { label: 'Before the learner starts', correct: false },
+          { label: 'Only when quitting the app', correct: false },
+        ],
+        correctMsg: 'Correct. The best score changes only when the new score is higher.',
+        incorrectMsg: 'Try again. lesson_best is updated when lesson_score beats it.',
+      },
+      {
+        headline: 'Review Loops Are Useful',
+        body: 'Incorrect answers should not be a dead end. A review loop gives the learner another chance after revisiting the key idea.',
+        question: 'What should an incorrect answer do in this template?',
+        options: [
+          { label: 'Increase lesson_wrong and return to review', correct: true },
+          { label: 'Increase lesson_score and finish', correct: false },
+          { label: 'Skip all remaining questions', correct: false },
+          { label: 'Erase the project variables', correct: false },
+        ],
+        correctMsg: 'Correct. Wrong attempts are counted and the learner returns to review.',
+        incorrectMsg: 'Not quite. Incorrect answers increase lesson_wrong and return to review.',
+      },
+      {
+        headline: 'Completion Uses A Flag',
+        body: 'The finish script sets lesson_complete to 1, sets progress to 100, checks best score, and moves to the completion page.',
+        statement: 'The finish script sets lesson_complete to 1.',
+        isCorrect: true,
+        correctMsg: 'Correct. lesson_complete becomes 1 when the lesson finishes.',
+        incorrectMsg: 'Incorrect. The finish script does set lesson_complete to 1.',
+      },
+      {
+        headline: 'Templates Stay Editable',
+        body: 'Every page, answer, and script block in this lesson is editable. Open FluxAura Fuse to change variables, branching, messages, and scoring.',
+        question: 'Where should authors edit the answer-button logic?',
+        options: [
+          { label: 'FluxAura Fuse script blocks', correct: true },
+          { label: 'The Windows unzip dialog', correct: false },
+          { label: 'The page background picker only', correct: false },
+          { label: 'The media thumbnail size', correct: false },
+        ],
+        correctMsg: 'Correct. Answer logic lives in editable Fuse script blocks.',
+        incorrectMsg: 'Review the template goal. Answer-button logic is edited in FluxAura Fuse.',
+      },
+    ]
+    const stepPage = (name, headline, body, pct, next, extra = [], showContinue = true) => ({
+      ...makePage(name), templateId: 'lesson', bgColor: '#0f172a',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: [
+        ...progressScript(pct),
+        setText('lesson-best-text', 'Best: {lesson_best}'),
+      ],
       elements: [
-        txt(`Step ${num}`, 40, 20, 200, 40, 13, '#6090b0'),
-        txt(headline, 40, 55, 944, 70, 34, '#ffffff'),
-        bodyTxt(body, 40, 145, 944, 160),
-        ...(num > 1 ? [navBtn('‹ Back', 40, 650, 'prev')] : []),
-        navBtn(num < 4 ? 'Continue ›' : '✓ Finish', num < 4 ? 764 : 372, 650, num < 4 ? 'next' : 'goto', num < 4 ? '' : 'Step 1'),
+        ...hud,
+        lessonTxt(headline, 82, 108, 860, 70, 40, '#fbbf24'),
+        lessonTxt(body, 122, 205, 780, 190, 22, '#dbeafe', '', '500'),
+        lessonTxt('', 162, 438, 700, 54, 20, '#fef3c7', 'lesson-feedback-text', '600'),
+        ...extra,
+        ...(showContinue ? [{ ...navBtn('Continue', 392, 590, 'goto', next), w: 240, h: 58, bgColor: '#2563eb', fgColor: '#ffffff', borderColor: '#93c5fd', radius: '8px', fontSize: 20 }] : []),
       ],
     })
+    const answerBtn = (label, x, y, w, correct, nextPage, retryPage, correctMsg, incorrectMsg) => ({
+      ...makeElem('button', x, y, w, 58),
+      label, action: 'script', script: checkpointScript(correct, nextPage, retryPage, correctMsg, incorrectMsg),
+      bgColor: '#1e293b', fgColor: '#e0f2fe', borderColor: '#38bdf8', borderWidth: 2,
+      radius: '8px', bevel: false, fontSize: 15, font: 'Rajdhani', fontWeight: '700',
+    })
+    const checkpointPage = (name, item, nextPage, retryPage, index) => {
+      const isCorrectIncorrect = item.statement != null
+      const answers = isCorrectIncorrect
+        ? [
+            { label: 'CORRECT', correct: item.isCorrect === true },
+            { label: 'INCORRECT', correct: item.isCorrect !== true },
+          ]
+        : item.options
+      const buttonEls = isCorrectIncorrect
+        ? [
+            answerBtn(answers[0].label, 242, 372, 250, answers[0].correct, nextPage, retryPage, item.correctMsg, item.incorrectMsg),
+            answerBtn(answers[1].label, 532, 372, 250, answers[1].correct, nextPage, retryPage, item.correctMsg, item.incorrectMsg),
+          ]
+        : answers.map((answer, i) => {
+            const x = i % 2 === 0 ? 122 : 532
+            const y = i < 2 ? 346 : 418
+            return answerBtn(answer.label, x, y, 370, !!answer.correct, nextPage, retryPage, item.correctMsg, item.incorrectMsg)
+          })
+      return ({
+      ...makePage(name), templateId: 'lesson', bgColor: '#111827',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: [
+        setText('lesson-progress-text', 'Progress: {lesson_progress}%'),
+        setText('lesson-score-text', 'Score: {lesson_score}'),
+        setText('lesson-best-text', 'Best: {lesson_best}'),
+        setText('lesson-feedback-text', '{lesson_feedback}'),
+      ],
+      elements: [
+        ...hud,
+        lessonTxt(`Checkpoint ${index + 1} of ${lessonItems.length}`, 112, 98, 800, 54, 36, '#fbbf24'),
+        lessonTxt(isCorrectIncorrect ? item.statement : item.question, 112, 175, 800, 112, 25, '#ffffff'),
+        ...buttonEls,
+        lessonTxt('', 162, 506, 700, 54, 20, '#fef3c7', 'lesson-feedback-text', '600'),
+        { ...navBtn('Review Step', 392, 590, 'goto', retryPage), w: 240, h: 50, bgColor: '#374151', fgColor: '#dbeafe', borderColor: '#64748b' },
+      ],
+    })}
+    const intro = {
+      ...makePage('Lesson Start'), templateId: 'lesson', bgColor: '#111827',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      elements: [
+        lessonTxt('Interactive Lesson Template', 82, 94, 860, 72, 46, '#fbbf24'),
+        lessonTxt('Build a short lesson with editable content pages, checkpoint questions, scoring, and completion feedback.', 122, 195, 780, 88, 24, '#dbeafe', '', '500'),
+        lessonTxt('Edit the text, add media, and open FluxAura Fuse on checkpoint buttons to change the logic.', 142, 330, 740, 56, 19, '#93c5fd', '', '500'),
+        { ...navBtn('Start Lesson', 392, 520, 'script'), w: 240, h: 58, bgColor: '#16a34a', fgColor: '#ffffff', borderColor: '#86efac', radius: '8px', fontSize: 20, script: resetScript },
+      ],
+    }
+    const complete = {
+      ...makePage('Lesson Complete'), templateId: 'lesson', bgColor: '#052e16',
+      timing: { mode: 'none', duration: 0, ms: 0 },
+      onStartScript: [
+        setText('lesson-final-score', `Score: {lesson_score}/${lessonItems.length}`),
+        setText('lesson-final-wrong', 'Incorrect attempts: {lesson_wrong}'),
+        setText('lesson-final-best', `Best saved score: {lesson_best}/${lessonItems.length}`),
+      ],
+      elements: [
+        lessonTxt('Lesson Complete', 112, 100, 800, 78, 54, '#86efac'),
+        lessonTxt('Great work. You reached the end of the lesson.', 142, 210, 740, 58, 26, '#d1fae5', '', '600'),
+        lessonTxt(`Score: 0/${lessonItems.length}`, 312, 328, 400, 42, 28, '#fef08a', 'lesson-final-score'),
+        lessonTxt('Incorrect attempts: 0', 312, 382, 400, 36, 22, '#fecaca', 'lesson-final-wrong', '600'),
+        lessonTxt(`Best saved score: 0/${lessonItems.length}`, 312, 430, 400, 36, 22, '#fbbf24', 'lesson-final-best', '600'),
+        { ...navBtn('Restart Lesson', 302, 540, 'goto', 'Lesson Start'), w: 220, h: 54, bgColor: '#16a34a', fgColor: '#ffffff', borderColor: '#86efac', radius: '8px', fontSize: 18 },
+        { ...navBtn('Quit', 542, 540, 'quit'), w: 160, h: 54, bgColor: '#1f2937', fgColor: '#dbeafe', borderColor: '#64748b', radius: '8px', fontSize: 18 },
+      ],
+    }
+    const lessonFlowPages = lessonItems.flatMap((item, index) => {
+      const stepName = `Lesson Step ${index + 1}`
+      const checkpointName = `Checkpoint ${index + 1}`
+      const nextPage = index < lessonItems.length - 1 ? `Lesson Step ${index + 2}` : 'Lesson Summary'
+      const pct = Math.round(((index + 1) / (lessonItems.length + 1)) * 90)
+      return [
+        stepPage(stepName, item.headline, item.body, pct, checkpointName),
+        checkpointPage(checkpointName, item, nextPage, stepName, index),
+      ]
+    })
     return [
-      step('Intro', 0, 'Welcome to this Lesson', 'This template walks you through a step-by-step tutorial.\nEdit each page to add your own content, images and media.'),
-      step('Step 1', 1, 'Lesson Objective',       'Describe what the learner will achieve by the end of this lesson. Keep it clear and specific.'),
-      step('Step 2', 2, 'Key Concept',            'Explain the main concept here. Use images or video clips for visual support.'),
-      step('Step 3', 3, 'Practice Activity',      'Present a task or activity for the learner to complete. Use buttons to guide interaction.'),
-      step('Step 4', 4, 'Summary & Review',       'Recap the key points covered. Celebrate completion and link to the next lesson.'),
+      intro,
+      ...lessonFlowPages,
+      stepPage('Lesson Summary', 'Summary And Review', 'You completed all 10 checkpoints. Review your score, incorrect attempts, and best saved score, then finish the lesson.', 95, 'Lesson Complete', [
+        { ...navBtn('Finish Lesson', 392, 590, 'script'), w: 240, h: 58, bgColor: '#16a34a', fgColor: '#ffffff', borderColor: '#86efac', radius: '8px', fontSize: 20, script: finishScript },
+      ], false),
+      complete,
     ]
   }
 
@@ -1090,15 +2058,25 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
   const visitCounts = useRef({})  // track visits per page id for ifMode='count'
   const scriptVars = useRef({})   // runtime variable store for ifMode='var'
   const soundRef = useRef(null)   // page background sound <Audio>
+  const soundTimerRef = useRef(null)
+  const persistedPageSoundActiveRef = useRef(false)
   const presAudioRef = useRef(null) // persistent presentation track — survives page changes
-  const narrationRef = useRef(null) // per-page narration audio (Piper TTS / loaded WAV)
+  const narrationRef = useRef(null) // PAGE AUDIO 1 (Piper TTS / loaded WAV)
+  const narration2Ref = useRef(null) // PAGE AUDIO 2 (second narration/transcription track)
+  const pageAudioClipRefs = useRef([]) // clip-based PAGE AUDIO 1/2 narration/dialogue
+  const pageAudioClipMetaRef = useRef(new WeakMap())
+  const pageAudioClipTimers = useRef([])
+  const persistedPageAudioActiveRef = useRef(false)
+  const pageMediaWaitRef = useRef(null) // media-end page timing tracker
   const idxRef = useRef(idx)         // stable ref to current idx for lyric sync rAF loop
   const [elapsed, setElapsed] = useState(0)
   const [dbgOpen, setDbgOpen] = useState(true)
   const [dbgVarSnapshot, setDbgVarSnapshot] = useState({})
   const [hideMediaCtrls, setHideMediaCtrls] = useState(!!(interactive || hideMediaControls))
+  const [, setPageAudioTimingVersion] = useState(0)
   const pageStartRef = useRef(Date.now())
   const bookmarkRef = useRef(null)    // for GO TO (bookmark) / RETURN TO BOOKMARK
+  const karaokeAudioRefsByTextId = useRef(new Map())
   const [elOverrides, setElOverrides] = useState({}) // {elLabel: {visible, opacity, text, ...}}
   const [hoveredElId, setHoveredElId] = useState(null) // for hover sound/media overlays
   const [clickedElId, setClickedElId] = useState(null) // for click media overlays
@@ -1399,27 +2377,21 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
     setDbgVarSnapshot({ ...init })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  // Apply hardware performance tier to document root on mount
+  useEffect(() => { applyTierToDocument(detectTier()) }, [])
   const onNavigateRef = useRef(onNavigate)
   useEffect(() => { onNavigateRef.current = onNavigate })
 
-  // Adaptive scaling — fit stage inside available screen space
+  // Adaptive scaling: fit the stage inside the real presenter canvas area.
   const overlayRef = useRef(null)
-  // stageAreaRef measures the EXACT available area for the canvas, bypassing all
-  // hardcoded control-bar-height assumptions. This is the definitive source of truth.
   const stageAreaRef = useRef(null)
-  // layout = { scale, left, top } — computed together so they are ALWAYS consistent.
-  // position:fixed on the wrap means left/top are viewport-relative — no containing-block
-  // ambiguity, no flex-layout interaction, no ref-timing dependency.
   const [layout, setLayout] = useState(() => {
-    const ctrlH = (showControls !== false && !interactive) ? 40 : 0
     if (!stageWidth || !stageHeight) return { scale: 1, left: 0, top: 0 }
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    const s = Math.min(vw / stageWidth, (vh - ctrlH) / stageHeight)
+    const s = Math.min(window.innerWidth / stageWidth, window.innerHeight / stageHeight)
     return {
       scale: s,
-      left: Math.max(0, Math.round((vw - stageWidth  * s) / 2)),
-      top:  Math.max(0, Math.round((vh - ctrlH - stageHeight * s) / 2)),
+      left: Math.max(0, Math.round((window.innerWidth - stageWidth * s) / 2)),
+      top: Math.max(0, Math.round((window.innerHeight - stageHeight * s) / 2)),
     }
   })
   const elPlayCounts = useRef({})  // per-element play counts, reset on page change
@@ -1428,16 +2400,14 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
   useEffect(() => {
     function recalcScale() {
       if (!stageWidth || !stageHeight) return
-      // Use overlayRef (position:fixed; inset:0) — guaranteed to equal viewport dimensions.
-      // Subtract 1px from height to avoid sub-pixel boundary clips.
-      const ctrlH = (showControls !== false && !interactive) ? 40 : 0
-      const vw = window.innerWidth
-      const vh = window.innerHeight
-      const s = Math.min(vw / stageWidth, (vh - ctrlH - 1) / stageHeight)
+      const area = stageAreaRef.current
+      const aw = Math.max(1, area?.clientWidth || window.innerWidth)
+      const ah = Math.max(1, area?.clientHeight || window.innerHeight)
+      const s = Math.min(aw / stageWidth, ah / stageHeight)
       setLayout({
         scale: s,
-        left: Math.max(0, Math.round((vw - stageWidth  * s) / 2)),
-        top:  Math.max(0, Math.round((vh - ctrlH - stageHeight * s) / 2)),
+        left: Math.max(0, Math.round((aw - stageWidth * s) / 2)),
+        top: Math.max(0, Math.round((ah - stageHeight * s) / 2)),
       })
     }
     recalcScale()
@@ -1478,39 +2448,195 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
   // Snapshot scriptVars for the debug overlay on page change
   useEffect(() => { setDbgVarSnapshot({ ...scriptVars.current }) }, [idx])
 
+  // Reset per-text karaoke ref bindings on page change.
+  useEffect(() => {
+    karaokeAudioRefsByTextId.current = new Map()
+  }, [idx])
+
   const page = pages[idx] || null
 
   // Page background sound — play/stop as pages change
   useEffect(() => {
-    if (soundRef.current) { soundRef.current.pause(); soundRef.current = null }
+    const stopPageSound = () => {
+      if (soundTimerRef.current) {
+        clearTimeout(soundTimerRef.current)
+        soundTimerRef.current = null
+      }
+      if (soundRef.current) {
+        try { soundRef.current.pause() } catch { /* ignore */ }
+        try { soundRef.current.src = '' } catch { /* ignore */ }
+        soundRef.current = null
+      }
+    }
+    if (!persistedPageSoundActiveRef.current) stopPageSound()
     const snd = page?.sound
-    if (snd?.file) {
+    const timelineBackgroundSound = (page?.elements || []).find((el) =>
+      el?.visible !== false &&
+      el?.file &&
+      (el?.pageAudioLane === 'background' || el?.pageAudioRole === 'background-sound' || el?.isPageBackgroundSound) &&
+      (el.mediaKind === 'audio' || /\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(String(el.file || el.mediaName || '')))
+    )
+    if (persistedPageSoundActiveRef.current) {
+      return () => {
+        if (!page?.persistAudio) {
+          stopPageSound()
+          persistedPageSoundActiveRef.current = false
+        }
+      }
+    }
+    const soundSource = timelineBackgroundSound?.file || snd?.file || snd?.sourcePath || ''
+    if (soundSource) {
       try {
-        const url = /^(https?:|data:|blob:|app-media:)/i.test(snd.file)
-          ? snd.file
-          : makeAppMediaUrl(snd.file)
+        const url = /^(https?:|data:|blob:|app-media:)/i.test(soundSource)
+          ? soundSource
+          : makeAppMediaUrl(soundSource)
         const audio = new Audio(url)
-        audio.loop = !!snd.loops
-        audio.play().catch(() => {})
+        audio.loop = !!(timelineBackgroundSound?.loop ?? snd?.loops)
+        audio.preload = 'auto'
+        audio.volume = Math.max(0, Math.min(1, Number(timelineBackgroundSound?.volume ?? snd?.volume ?? 1)))
         soundRef.current = audio
+        const play = () => {
+          soundTimerRef.current = null
+          audio.play().catch(() => {})
+        }
+        const delay = Math.max(0, Number(timelineBackgroundSound?.pageAudioOffset ?? timelineBackgroundSound?.mediaStartTime ?? 0) || 0) * 1000
+        if (delay > 0) soundTimerRef.current = setTimeout(play, delay)
+        else play()
       } catch { /* ignore */ }
     }
-    return () => { if (soundRef.current) { soundRef.current.pause(); soundRef.current = null } }
+    persistedPageSoundActiveRef.current = !!page?.persistAudio
+    return () => {
+      if (!page?.persistAudio) {
+        stopPageSound()
+        persistedPageSoundActiveRef.current = false
+      }
+    }
   }, [idx, page])
 
-  // Per-page narration audio — play/stop on page change
+  // Per-page narration audio clips — play/stop on page change
   useEffect(() => {
-    if (narrationRef.current) { narrationRef.current.pause(); narrationRef.current.src = '' }
-    const nar = page?.narration
-    if (nar?.file) {
+    const stopTrack = (ref) => {
+      if (ref.current) {
+        try { ref.current.pause(); ref.current.src = '' } catch { /* ignore */ }
+        ref.current = null
+      }
+    }
+    const metadataCleanupFns = []
+    const notifyTimingReady = () => setPageAudioTimingVersion((v) => v + 1)
+    const watchAudioMetadata = (audio) => {
+      if (!audio) return
+      let lastDuration = Number.isFinite(audio.duration) ? Number(audio.duration) : -1
+      const onMaybeChanged = () => {
+        const nextDuration = Number.isFinite(audio.duration) ? Number(audio.duration) : -1
+        if (nextDuration > 0 && nextDuration !== lastDuration) {
+          lastDuration = nextDuration
+          notifyTimingReady()
+        }
+      }
+      audio.addEventListener('loadedmetadata', onMaybeChanged)
+      audio.addEventListener('durationchange', onMaybeChanged)
+      metadataCleanupFns.push(() => {
+        audio.removeEventListener('loadedmetadata', onMaybeChanged)
+        audio.removeEventListener('durationchange', onMaybeChanged)
+      })
+      onMaybeChanged()
+    }
+    const stopClipRefs = () => {
+      pageAudioClipTimers.current.forEach(clearTimeout)
+      pageAudioClipTimers.current = []
+      pageAudioClipRefs.current.forEach((audio) => {
+        try { audio.pause(); audio.src = '' } catch { /* ignore */ }
+      })
+      pageAudioClipRefs.current = []
+      pageAudioClipMetaRef.current = new WeakMap()
+    }
+    const startTrack = (track, ref) => {
+      if (!track?.file) return
       try {
-        const url = /^(https?:|data:|blob:|app-media:)/i.test(nar.file) ? nar.file : makeAppMediaUrl(nar.file)
+        const url = /^(https?:|data:|blob:|app-media:)/i.test(track.file) ? track.file : makeAppMediaUrl(track.file)
         const audio = new Audio(url)
-        narrationRef.current = audio
-        if (nar.autoPlay !== false) audio.play().catch(() => {})
+        audio.preload = 'auto'
+        audio.currentTime = Number(track.offset) || 0
+        watchAudioMetadata(audio)
+        ref.current = audio
+        if (track.autoPlay !== false) audio.play().catch(() => {})
       } catch { /* ignore */ }
     }
-    return () => { if (narrationRef.current) { narrationRef.current.pause(); narrationRef.current.src = '' } }
+    const startClip = (clip) => {
+      if (!clip?.file) return
+      try {
+        const url = /^(https?:|data:|blob:|app-media:)/i.test(clip.file) ? clip.file : makeAppMediaUrl(clip.file)
+        const audio = new Audio(url)
+        audio.preload = 'auto'
+        audio.currentTime = Number(clip.trimStart) || 0
+        audio.loop = !!clip.loop
+        audio.volume = Math.max(0, Math.min(1, Number(clip.volume ?? 1)))
+        watchAudioMetadata(audio)
+        pageAudioClipMetaRef.current.set(audio, {
+          clipId: String(clip.id || ''),
+          sourceTextElementId: String(clip.sourceTextElementId || clip.textElementId || ''),
+          isNarrationClip: !!clip.isNarrationClip,
+        })
+        pageAudioClipRefs.current.push(audio)
+        const play = () => {
+          if (clip.autoPlay !== false) audio.play().catch(() => {})
+        }
+        const delay = Math.max(0, Number(clip.offset) || 0) * 1000
+        if (delay > 0) pageAudioClipTimers.current.push(setTimeout(play, delay))
+        else play()
+      } catch { /* ignore */ }
+    }
+    if (persistedPageAudioActiveRef.current) {
+      return () => {
+        if (!page?.persistAudio) {
+          stopTrack(narrationRef)
+          stopTrack(narration2Ref)
+          stopClipRefs()
+          persistedPageAudioActiveRef.current = false
+        }
+      }
+    }
+    if (!persistedPageAudioActiveRef.current) {
+      stopTrack(narrationRef)
+      stopTrack(narration2Ref)
+      stopClipRefs()
+    }
+    startTrack(page?.narration, narrationRef)
+    startTrack(page?.narration2, narration2Ref)
+    ;(page?.pageAudioClips || []).forEach(startClip)
+    ;(page?.elements || [])
+      .filter((el) =>
+        el?.visible !== false &&
+        el?.pageAudioLane &&
+        el?.pageAudioLane !== 'background' &&
+        el?.pageAudioRole !== 'background-sound' &&
+        !el?.isPageBackgroundSound &&
+        el?.file &&
+        (el.mediaKind === 'audio' || /\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(String(el.file || el.mediaName || '')))
+      )
+      .forEach((el) => startClip({
+        id: el.id,
+        file: el.file,
+        name: el.mediaName || el.elLabel || `Page Audio ${el.pageAudioLane}`,
+        sourcePath: el.mediaSourcePath || '',
+        offset: Number(el.pageAudioOffset ?? el.mediaStartTime) || 0,
+        trimStart: 0,
+        loop: !!el.loop,
+        volume: Number(el.volume ?? 1),
+        autoPlay: el.autoPlay !== false,
+        sourceTextElementId: el.sourceTextElementId || '',
+        isNarrationClip: !!el.isNarrationClip,
+      }))
+    persistedPageAudioActiveRef.current = !!page?.persistAudio
+    return () => {
+      metadataCleanupFns.forEach((cleanup) => cleanup())
+      if (!page?.persistAudio) {
+        stopTrack(narrationRef)
+        stopTrack(narration2Ref)
+        stopClipRefs()
+        persistedPageAudioActiveRef.current = false
+      }
+    }
   }, [idx, page])
   useEffect(() => {
     // Helper to apply trim/offset/rate to an audio element
@@ -1544,12 +2670,10 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
       if (presentationAudio?.volume != null) presAudioRef.current.volume = presentationAudio.volume
       presAudioRef.current.loop = presentationAudio?.loop !== false
       const cleanTrim = applyAudioClipSettings(presAudioRef.current, presentationAudio)
-      const offset = presentationAudio?.offset ?? 0
-      const audioEl = presAudioRef.current
-      const startPlay = () => audioEl.play().catch((err) => { console.error('[FluxAura Studio] Audio adoption play failed:', err) })
-      let timerId
-      if (offset > 0) { timerId = setTimeout(startPlay, offset * 1000) } else { startPlay() }
-      return () => { clearTimeout(timerId); cleanTrim?.(); if (presAudioRef.current) { try { presAudioRef.current.pause() } catch { /* noop */ } }; presAudioRef.current = null }
+      // Do not call play() or re-apply offset here.
+      // The user-gesture starter path already handled both, and duplicating them
+      // can introduce startup delay/stutter on the first presented page.
+      return () => { cleanTrim?.(); if (presAudioRef.current) { try { presAudioRef.current.pause() } catch { /* noop */ } }; presAudioRef.current = null }
     }
     // Fallback path (Electron, or browser with autoplay already granted)
     if (presAudioRef.current) { try { presAudioRef.current.pause() } catch { /* noop */ } presAudioRef.current = null }
@@ -1577,6 +2701,11 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
       if (soundRef.current) { try { soundRef.current.pause() } catch { /* noop */ } soundRef.current = null }
       if (presAudioRef.current) { try { presAudioRef.current.pause() } catch { /* noop */ } presAudioRef.current = null }
       if (narrationRef.current) { try { narrationRef.current.pause() } catch { /* noop */ } narrationRef.current = null }
+      if (narration2Ref.current) { try { narration2Ref.current.pause() } catch { /* noop */ } narration2Ref.current = null }
+      pageAudioClipTimers.current.forEach(clearTimeout)
+      pageAudioClipTimers.current = []
+      pageAudioClipRefs.current.forEach((audio) => { try { audio.pause(); audio.src = '' } catch { /* noop */ } })
+      pageAudioClipRefs.current = []
       stopAllAudio()
     }
   }, [])
@@ -1588,7 +2717,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const timedDur = (page?.timing?.mode === 'pause' || page?.timing?.mode === 'auto') ? (Number(page?.timing?.duration) || 0) : 0
+  const timedDur = (page?.timing?.mode === 'pause' || page?.timing?.mode === 'auto') ? (pageTimingDurationMsForPage(page) / 1000) : 0
   useEffect(() => {
     pageStartRef.current = Date.now()
     setElapsed(0)
@@ -1604,8 +2733,8 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
         if (loop) { setPrevIdx(idx); setIdx(0); setPageKey((k) => k + 1); onNavigateRef.current?.(0); return }
         onClose(); return
       }
-      // Stop all playing audio/video when leaving a page, unless this page has persistAudio enabled
-      if (!pages[idx]?.persistAudio) stopAllAudio()
+      // Page-scoped audio/video is cleaned up by the page effects and unmounted media nodes.
+      // Presentation Audio intentionally continues through page changes until Stop/Esc.
       setPrevIdx(idx)
       setIdx(nextIdx)
       setPageKey((k) => k + 1)
@@ -1613,6 +2742,23 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
     },
     [pages, onClose, idx, loop],
   )
+
+  const navigateScriptTarget = useCallback((target) => {
+    if (typeof target === 'number' && Number.isFinite(target)) {
+      navigate(target)
+      return
+    }
+    if (target === 'next') navigate(idx + 1)
+    else if (target === 'prev') navigate(idx - 1)
+    else {
+      const t = String(target || '')
+      const tl = t.toLowerCase()
+      let ti = pages.findIndex(p => p.id === target || p.name === target)
+      if (ti < 0) ti = pages.findIndex(p => p.name?.toLowerCase() === tl)
+      if (ti < 0) ti = pages.findIndex(p => p.name?.toLowerCase().startsWith(tl + ' '))
+      if (ti >= 0) navigate(ti)
+    }
+  }, [idx, navigate, pages])
 
   // Resolve onEnd target index
   function resolveOnEnd(action, target) {
@@ -1635,10 +2781,43 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
     }
   }
 
+  function finishPageTiming(tm, conditionMet) {
+    if (conditionMet) {
+      const onEnd = tm.onEnd || 'continue'
+      resolveOnEnd(onEnd === 'continue' ? 'next' : onEnd, tm.onEndTarget)
+    } else {
+      const elseDo = tm.elseDo || 'none'
+      if (elseDo === 'none') navigate(idx + 1)
+      else resolveOnEnd(elseDo, tm.elseTarget)
+    }
+  }
+
+  function isAutoPageMedia(el) {
+    if (!el || (el.type !== 'clip' && el.type !== 'mpeg') || !el.file || el.visible === false) return false
+    const kind = el.mediaKind || detectMediaKind(el.file || el.mediaName || '')
+    if (kind !== 'video' && kind !== 'audio') return false
+    if (el.loop || el.playCount > 1 || el.pageAudioLane) return false
+    if (el.onPlayMode === 'click' || el.onPlayMode === 'click-next' || el.onPlayMode === 'hover' || el.onPlayMode === 'after-element' || el.onPlayMode === 'delay') return false
+    if (el.normalStatePlayTrigger === 'click' || el.normalStatePlayTrigger === 'hover') return false
+    if (el.waitToPlay && el.waitToPlay !== 'none') return false
+    return true
+  }
+
+  const notifyPageMediaEnded = useCallback((elId) => {
+    const tracker = pageMediaWaitRef.current
+    if (!tracker || tracker.pageIdx !== idx || !tracker.expected?.has(elId)) return
+    tracker.done.add(elId)
+    if (tracker.done.size >= tracker.expected.size) {
+      pageMediaWaitRef.current = null
+      tracker.complete?.()
+    }
+  }, [idx])
+
   // Page auto-advance
   useEffect(() => {
     if (!page) return
     if (timerRef.current) clearTimeout(timerRef.current)
+    pageMediaWaitRef.current = null
 
     // Increment visit count for this page
     const pid = page.id || String(idx)
@@ -1652,18 +2831,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
 
     // Execute page onStartScript blocks
     if (page.onStartScript?.length) {
-      const navigateFromScript = (target) => {
-        if (target === 'next') navigate(idx + 1)
-        else if (target === 'prev') navigate(idx - 1)
-        else {
-          const tl = (target || '').toLowerCase()
-          let ti = pages.findIndex(p => p.id === target || p.name === target)
-          if (ti < 0) ti = pages.findIndex(p => p.name?.toLowerCase() === tl)
-          if (ti < 0) ti = pages.findIndex(p => p.name?.toLowerCase().startsWith(tl + ' '))
-          if (ti >= 0) navigate(ti)
-        }
-      }
-      executeScript(page.onStartScript, scriptVars.current, pages, navigateFromScript, elCtrlFn, bookmarkRef)
+      executeScript(page.onStartScript, scriptVars.current, pages, navigateScriptTarget, elCtrlFn, bookmarkRef)
         .catch(console.error)
         .finally(() => setDbgVarSnapshot({ ...scriptVars.current }))
     }
@@ -1756,26 +2924,35 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
       else if (op === '<=') conditionMet = Number(varVal) <= Number(cmpVal)
     }
 
-    if ((tm.mode === 'pause' || tm.mode === 'auto') && (tm.duration || 0) > 0) {
+    const durationMs = pageTimingDurationMsForPage(page)
+    if ((tm.mode === 'pause' || tm.mode === 'auto') && durationMs > 0) {
       timerRef.current = setTimeout(() => {
-        if (conditionMet) {
-          const onEnd = tm.onEnd || 'continue'
-          resolveOnEnd(onEnd === 'continue' ? 'next' : onEnd, tm.onEndTarget)
-        } else {
-          const elseDo = tm.elseDo || 'none'
-          if (elseDo === 'none') navigate(idx + 1)
-          else resolveOnEnd(elseDo, tm.elseTarget)
-        }
-      }, tm.duration * 1000)
+        finishPageTiming(tm, conditionMet)
+      }, durationMs)
     }
     // Loop mode — advance to next page, wrapping back to start at end
-    if (tm.mode === 'loop' && (tm.duration || 0) > 0) {
+    if (tm.mode === 'loop' && durationMs > 0) {
       timerRef.current = setTimeout(() => {
         const next = idx + 1 >= pages.length ? 0 : idx + 1
         navigate(next)
-      }, tm.duration * 1000)
+      }, durationMs)
     }
-    return () => { if (timerRef.current) clearTimeout(timerRef.current) }
+    if (tm.mode === 'media') {
+      const expected = new Set((page.elements || []).filter(isAutoPageMedia).map(el => el.id))
+      if (expected.size > 0) {
+        pageMediaWaitRef.current = {
+          pageIdx: idx,
+          expected,
+          done: new Set(),
+          complete: () => finishPageTiming(tm, conditionMet),
+        }
+      } else if (durationMs > 0) {
+        timerRef.current = setTimeout(() => {
+          finishPageTiming(tm, conditionMet)
+        }, durationMs)
+      }
+    }
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); pageMediaWaitRef.current = null }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- injectSystemVars/resolveOnEnd/pages are recreated each render; including them would cause infinite loops
   }, [idx, page, navigate])
 
@@ -1848,6 +3025,16 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.key === 'Escape') { onClose(); return }
       _lastKeyEvent.current = e
+      const keyBinding = (page?.keyBindings || []).find((binding) =>
+        binding?.enabled !== false && binding?.key && matchesKeyCombo(e.key, binding.key)
+      )
+      if (keyBinding?.script?.length) {
+        e.preventDefault()
+        executeScript(keyBinding.script, scriptVars.current, pages, navigateScriptTarget, elCtrlFn, bookmarkRef)
+          .catch(console.error)
+          .finally(() => setDbgVarSnapshot({ ...scriptVars.current }))
+        return
+      }
       // Fire all key-triggered show/hide and waitToPlay resolvers first
       resolveWaitToPlay('key', e.key)
       processTriggers('key', e.key)
@@ -1856,9 +3043,12 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
         triggerOutWaiters('key', e.key)
         return  // consume keypress for animation, don't navigate yet
       }
-      if (e.key === 'ArrowRight' || e.key === 'PageDown') navigate(idx + 1)
-      if (e.key === 'ArrowLeft' || e.key === 'PageUp') navigate(idx - 1)
-      if (e.key === ' ') { e.preventDefault(); navigate(idx + 1) }
+      const allowGlobalNavKeys = !interactive || showControls !== false
+      if (allowGlobalNavKeys) {
+        if (e.key === 'ArrowRight' || e.key === 'PageDown') navigate(idx + 1)
+        if (e.key === 'ArrowLeft' || e.key === 'PageUp') navigate(idx - 1)
+        if (e.key === ' ') { e.preventDefault(); navigate(idx + 1) }
+      }
       // Handle wait-input-goto mode keyboard trigger
       const tm = page?.timing || {}
       if (tm.mode === 'wait-input-goto') {
@@ -1877,7 +3067,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   // eslint-disable-next-line react-hooks/exhaustive-deps -- triggerOutWaiters only reads from a stable ref, no need to re-subscribe
-  }, [idx, navigate, onClose])
+  }, [idx, navigate, onClose, interactive, showControls])
 
   function handleBgClick() {
     // Trigger click-triggered show/hide and waitToPlay
@@ -1957,12 +3147,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
 
   function handleElClickAction(e, el) {
     if (el.onClickScript?.length) {
-      const nav = (target) => {
-        if (target === 'next') navigate(idx + 1)
-        else if (target === 'prev') navigate(idx - 1)
-        else { const ti = pages.findIndex(p => p.id === target || p.name === target); if (ti >= 0) navigate(ti) }
-      }
-      executeScript(el.onClickScript, scriptVars.current, pages, nav, elCtrlFn, bookmarkRef)
+      executeScript(el.onClickScript, scriptVars.current, pages, navigateScriptTarget, elCtrlFn, bookmarkRef)
         .catch(console.error)
         .finally(() => setDbgVarSnapshot({ ...scriptVars.current }))
       // Only return early if there's no legacy action to also run
@@ -2007,9 +3192,13 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
         return  // never fall through to page navigation regardless of mediaFile presence
       }
       if (act === 'event') {
-        if (el.elLabel === 'narration-btn' && narrationRef.current) {
-          if (narrationRef.current.paused) narrationRef.current.play().catch(() => {})
-          else narrationRef.current.pause()
+        if (el.elLabel === 'narration-btn') {
+          const targets = [narrationRef.current, narration2Ref.current, ...pageAudioClipRefs.current].filter(Boolean)
+          const shouldPlay = targets.some((audio) => audio.paused)
+          targets.forEach((audio) => {
+            if (shouldPlay) audio.play().catch(() => {})
+            else audio.pause()
+          })
         }
         return
       }
@@ -2041,13 +3230,9 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
         return
       }
       if (act === 'script' && el.script?.length) {
-        const nav = (target) => {
-          if (target === 'next') navigate(idx + 1)
-          else if (target === 'prev') navigate(idx - 1)
-          else { const ti = pages.findIndex(p => p.id === target || p.name === target); if (ti >= 0) navigate(ti) }
-        }
-        executeScript(el.script, scriptVars.current, pages, nav)
-        setDbgVarSnapshot({ ...scriptVars.current })
+        executeScript(el.script, scriptVars.current, pages, navigateScriptTarget, elCtrlFn, bookmarkRef)
+          .catch(console.error)
+          .finally(() => setDbgVarSnapshot({ ...scriptVars.current }))
         return
       }
       navigate(idx + 1)
@@ -2165,15 +3350,238 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
   }
 
   function renderElements(pg, animateIn) {
+    const normalizeForMatch = (value) => String(value || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    const calcMatchScore = (textValue, clipValue) => {
+      const txt = normalizeForMatch(textValue)
+      const clipTxt = normalizeForMatch(clipValue)
+      if (!txt || !clipTxt) return 0
+      if (txt === clipTxt) return 1000
+      if (clipTxt.includes(txt) || txt.includes(clipTxt)) return 700
+      const txtTokens = new Set(txt.split(' ').filter(Boolean))
+      const clipTokens = clipTxt.split(' ').filter(Boolean)
+      if (!txtTokens.size || !clipTokens.length) return 0
+      let overlap = 0
+      clipTokens.forEach((token) => { if (txtTokens.has(token)) overlap += 1 })
+      return overlap
+    }
+
+    const narrationCandidatesBase = (() => {
+      const raw = [
+        ...(pg?.elements || []).filter((item) =>
+          item?.type === 'clip' &&
+          item?.file &&
+          (Number(item?.pageAudioLane) === 1 || Number(item?.pageAudioLane) === 2),
+        ),
+        ...((pg?.pageAudioClips || []).filter((clip) => !!clip?.file)),
+      ]
+      const deduped = []
+      const seen = new Set()
+      raw.forEach((clip) => {
+        const key = [
+          String(clip?.id || ''),
+          String(clip?.sourceTextElementId || clip?.textElementId || ''),
+          String(clip?.file || ''),
+          Number(clip?.offset ?? clip?.pageAudioOffset ?? clip?.mediaStartTime ?? 0),
+        ].join('|')
+        if (seen.has(key)) return
+        seen.add(key)
+        deduped.push(clip)
+      })
+      return deduped
+    })()
+
+    const textElementsForPairing = (pg?.elements || [])
+      .filter((item) => item?.type === 'text' && item?.visible !== false)
+      .sort((a, b) => (a.y - b.y) || (a.x - b.x) || (a.z - b.z))
+
+    const narrationCandidatesForPairing = narrationCandidatesBase
+      .map((clip, index) => ({
+        clip,
+        index,
+        sortOffset: Number(clip?.offset ?? clip?.pageAudioOffset ?? clip?.mediaStartTime) || 0,
+      }))
+      .sort((a, b) => (a.sortOffset - b.sortOffset) || a.index - b.index)
+
+    const fallbackTextClipMap = new Map()
+    if (textElementsForPairing.length && narrationCandidatesForPairing.length) {
+      const available = new Set(narrationCandidatesForPairing.map((_, idx) => idx))
+
+      // Pass 1: best unique text similarity match.
+      textElementsForPairing.forEach((textEl) => {
+        const txt = String(textEl?.content || textEl?.label || '')
+        let bestIdx = -1
+        let bestScore = 0
+        available.forEach((candidateIdx) => {
+          const candidate = narrationCandidatesForPairing[candidateIdx]
+          const clip = candidate?.clip
+          const score = calcMatchScore(txt, clip?.textPreview || clip?.name || clip?.elLabel)
+          if (score > bestScore) {
+            bestScore = score
+            bestIdx = candidateIdx
+          }
+        })
+        if (bestIdx >= 0 && bestScore > 0) {
+          fallbackTextClipMap.set(String(textEl?.id || ''), narrationCandidatesForPairing[bestIdx].clip)
+          available.delete(bestIdx)
+        }
+      })
+
+      // Pass 2: sequential fallback by text order and clip offset order.
+      const unmatchedText = textElementsForPairing.filter((textEl) => !fallbackTextClipMap.has(String(textEl?.id || '')))
+      const remainingClipIdx = [...available]
+      unmatchedText.forEach((textEl, idx) => {
+        const candidateIdx = remainingClipIdx[idx]
+        if (candidateIdx == null) return
+        fallbackTextClipMap.set(String(textEl?.id || ''), narrationCandidatesForPairing[candidateIdx].clip)
+      })
+    }
+
+    const resolveTextNarrationClip = (textEl, textValue) => {
+      const textId = String(textEl?.id || '')
+      const narrationCandidates = narrationCandidatesBase
+      if (!narrationCandidates.length) return null
+
+      if (textId) {
+        const linkedById = narrationCandidates.find((clip) =>
+          String(clip?.sourceTextElementId || clip?.textElementId || '') === textId,
+        )
+        if (linkedById) return linkedById
+
+        const fallbackLinked = fallbackTextClipMap.get(textId)
+        if (fallbackLinked) return fallbackLinked
+      }
+
+      const normalizedText = normalizeForMatch(textValue || textEl?.content || textEl?.label)
+      if (normalizedText) {
+        const needle = normalizedText.slice(0, Math.min(60, normalizedText.length))
+        const linkedByText = narrationCandidates.find((clip) => {
+          const preview = normalizeForMatch(clip?.textPreview || clip?.name || clip?.elLabel)
+          if (!preview) return false
+          return preview.includes(needle) || needle.includes(preview.slice(0, Math.min(28, preview.length)))
+        })
+        if (linkedByText) return linkedByText
+      }
+
+      return narrationCandidates.length === 1 ? narrationCandidates[0] : null
+    }
+
+    const buildNarrationWordTimestamps = (textEl, textValue, linkedClip = null) => {
+      const clip = linkedClip || resolveTextNarrationClip(textEl, textValue)
+      if (!clip) return null
+
+      if (Array.isArray(clip?.wordTimestamps) && clip.wordTimestamps.length > 0) {
+        return clip.wordTimestamps
+          .map((word) => ({
+            start: Number(word?.start),
+            end: Number(word?.end),
+            text: String(word?.text ?? word?.word ?? ''),
+          }))
+          .filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start && word.text)
+      }
+
+      const normalizedText = String(textValue || clip?.textPreview || '').trim()
+      const words = normalizedText.match(/\S+\s*/g) || []
+      if (!words.length) return null
+
+      const trimStart = Math.max(0, Number(clip?.trimStart) || 0)
+      const trimEnd = Number(clip?.trimEnd)
+      const playbackRate = Math.max(0.05, Number(clip?.playbackRate) || 1)
+
+      const linkedAudio = pageAudioClipRefs.current.find((audio) =>
+        String(pageAudioClipMetaRef.current.get(audio)?.clipId || '') === String(clip?.id || ''),
+      ) || pageAudioClipRefs.current.find((audio) =>
+        String(pageAudioClipMetaRef.current.get(audio)?.sourceTextElementId || '') === String(textEl?.id || ''),
+      ) || narrationRef.current || narration2Ref.current || null
+
+      let measuredDuration = Number(
+        linkedAudio?.duration ??
+        clip?.duration ??
+        clip?.mediaDuration ??
+        clip?.audioDuration ??
+        clip?.clipDuration ??
+        clip?.naturalDuration,
+      )
+      if (Number.isFinite(measuredDuration) && measuredDuration > 0) {
+        if (Number.isFinite(trimEnd) && trimEnd > trimStart) {
+          measuredDuration = trimEnd - trimStart
+        } else if (measuredDuration > trimStart) {
+          measuredDuration -= trimStart
+        }
+      } else {
+        measuredDuration = estimateTimelineAudioDurationSeconds({ ...clip, textPreview: normalizedText })
+      }
+      const durationSec = Math.max(
+        words.length * 0.14,
+        Math.max(0.35, measuredDuration / playbackRate),
+      )
+
+      // Many narration clips have a little settling silence at the end.
+      // Reserve a small tail window so the final word clears before the next
+      // text block begins, instead of staying lit until the whole clip ends.
+      const leadPaddingSec = Math.min(0.05, durationSec * 0.03)
+      const tailPaddingSec = Math.min(0.32, Math.max(0.08, durationSec * 0.12))
+      const speechStartSec = trimStart + leadPaddingSec
+      const speechEndSec = Math.max(speechStartSec + (words.length * 0.09), (trimStart + durationSec) - tailPaddingSec)
+      const speechDurationSec = Math.max(0.2, speechEndSec - speechStartSec)
+
+      const tokenWeights = words.map((token) => {
+        const plain = token.replace(/\s+/g, '')
+        const len = plain.length
+        const punctuationBonus = /[.,!?;:]$/.test(plain) ? 0.45 : 0
+        return Math.max(0.35, 0.9 + Math.min(0.7, len * 0.06) + punctuationBonus)
+      })
+      const totalWeight = tokenWeights.reduce((sum, value) => sum + value, 0) || 1
+
+      // Narration words are aligned to the clip-local playback clock.
+      let cursor = speechStartSec
+      return words.map((word, i) => {
+        const slice = speechDurationSec * (tokenWeights[i] / totalWeight)
+        const start = cursor
+        const end = i === words.length - 1 ? speechEndSec : (start + slice)
+        cursor = end
+        return { start, end, text: word }
+      })
+    }
+
+    const resolveKaraokeAudioRef = (textEl, preferPageAudioClock = false, linkedNarrationClip = null) => {
+      const linkedClipById = linkedNarrationClip
+        ? pageAudioClipRefs.current.find((audio) =>
+            String(pageAudioClipMetaRef.current.get(audio)?.clipId || '') === String(linkedNarrationClip?.id || ''),
+          )
+        : null
+      const linkedClipAudio = pageAudioClipRefs.current.find((audio) =>
+        String(pageAudioClipMetaRef.current.get(audio)?.sourceTextElementId || '') === String(textEl?.id || ''),
+      )
+      const narrationClipAudio = pageAudioClipRefs.current.find((audio) => !!pageAudioClipMetaRef.current.get(audio)?.isNarrationClip)
+      const activePresAudio = presAudioRef.current ?? preCreatedAudioRef?.current ?? null
+      const pageAudioPreferred = linkedClipById || linkedClipAudio || narrationClipAudio || narrationRef.current || narration2Ref.current || pageAudioClipRefs.current[0] || null
+      const chosenAudio = preferPageAudioClock
+        ? (pageAudioPreferred || activePresAudio)
+        : (activePresAudio || pageAudioPreferred)
+      const textId = String(textEl?.id || '__default__')
+      let refObj = karaokeAudioRefsByTextId.current.get(textId)
+      if (!refObj) {
+        refObj = { current: null }
+        karaokeAudioRefsByTextId.current.set(textId, refObj)
+      }
+      refObj.current = chosenAudio
+      return refObj
+    }
+
     const sorted = [...(pg?.elements || [])].sort((a, b) => a.z - b.z)
     return sorted.map((el) => {
-      if (el.visible === false) return null
+      // Apply per-element overrides from script SHOW-EL/HIDE-EL/SET-TEXT/SET-OPACITY.
+      // Overrides must be able to reveal elements that start hidden, such as Memory Game card faces.
+      const ov = elOverrides[el.elLabel] || {}
+      const visibleByOverride = ov.visible != null ? ov.visible !== false : el.visible !== false
+      if (!visibleByOverride) return null
       // Hide lyric text elements if lyricsVisible is off
       if (el.elLabel === 'lyric' && !lyricsVisible) return null
-
-      // Apply per-element overrides from script SHOW-EL/HIDE-EL/SET-TEXT/SET-OPACITY
-      const ov = elOverrides[el.elLabel] || {}
-      if (ov.visible === false) return null
 
       // Evaluate show condition (Show IF variable = value)
       if (el.showCondition?.condVar) {
@@ -2267,10 +3675,13 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
       if (el.type === 'text') {
         const isCreditsScroll = el.animIn === 'scroll-up-credits' || el.animIn === 'scroll-down-credits'
 
-        // Karaoke mode: when the current page has word timestamps and this is the lyric element
-        const karaokeWords = (el.elLabel === 'lyric' && pg.wordTimestamps?.length > 0)
-          ? pg.wordTimestamps
-          : null
+        // Karaoke mode:
+        // 1) lyric pages use explicit page.wordTimestamps
+        // 2) narrated text uses a linked PAGE AUDIO clip timing model
+        const isLyricKaraoke = el.elLabel === 'lyric' && pg.wordTimestamps?.length > 0
+        const narrationLinkedClip = !isLyricKaraoke ? resolveTextNarrationClip(el, effectiveContent) : null
+        const narrationKaraokeWords = !isLyricKaraoke ? buildNarrationWordTimestamps(el, effectiveContent, narrationLinkedClip) : null
+        const karaokeWords = isLyricKaraoke ? pg.wordTimestamps : narrationKaraokeWords
 
         const textCommonStyle = /** @type {import('react').CSSProperties} */ ({
           ...elStyle, ...ws, ...getAnimStyle(el),
@@ -2301,7 +3712,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
             >
               <KaraokeText
                 words={karaokeWords}
-                audioRef={presAudioRef}
+                audioRef={resolveKaraokeAudioRef(el, !!narrationKaraokeWords && !isLyricKaraoke, narrationLinkedClip)}
                 activeColor='#f59e0b'
               />
             </div>
@@ -2321,6 +3732,9 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
 
       if (el.type === 'clip') {
         const kind = el.mediaKind || detectMediaKind(el.file || '')
+        if (kind === 'audio' && (el.pageAudioLane || el.pageAudioRole === 'background-sound' || el.isPageBackgroundSound)) {
+          return null
+        }
 
         // ── Shape Button (transparent PNG with alpha hit-test + bevel) ──
         if (el.shapeButton && el.file && kind === 'image') {
@@ -2380,7 +3794,20 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
             }}
           >
             {el.file && kind === 'image' && !isUnresolvedMediaPath(ov.imageSrc ?? el.file) && (
-              <img src={ov.imageSrc ?? el.file} alt="" onError={handleMediaError} style={{ width: '100%', height: '100%', objectFit: el.fit || 'contain', opacity: (el.opacity || 100) / 100 }} />
+              (el.chromaColor || el.chromaMaskShape || el.chromaSelections?.length) ? (
+                <ImageChromaCanvas
+                  src={ov.imageSrc ?? el.file}
+                  chromaColor={el.chromaColor || null}
+                  tolerance={el.chromaTolerance != null ? el.chromaTolerance : 30}
+                  softness={el.chromaSoftness != null ? el.chromaSoftness : 8}
+                  maskShape={el.chromaMaskShape || null}
+                  maskShapes={el.chromaSelections || null}
+                  onError={handleMediaError}
+                  style={{ objectFit: el.fit || 'contain', opacity: (el.opacity || 100) / 100 }}
+                />
+              ) : (
+                <img src={ov.imageSrc ?? el.file} alt="" onError={handleMediaError} style={{ width: '100%', height: '100%', objectFit: el.fit || 'contain', opacity: (el.opacity || 100) / 100 }} />
+              )
             )}
             {el.file && kind === 'image' && isUnresolvedMediaPath(ov.imageSrc ?? el.file) && (
               <div style={{ display: 'grid', placeItems: 'center', width: '100%', height: '100%', color: 'rgba(232,160,32,.5)', fontSize: 11, textAlign: 'center', padding: 4, background: 'rgba(0,0,0,.25)', border: '1px dashed rgba(232,160,32,.3)' }}>
@@ -2399,6 +3826,10 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
                 loop={el.playCount ? false : !!el.loop}
                 muted={el.mediaMuted || el.replaceAudio || !el.unmuted}
                 volume={el.mediaVolume != null ? el.mediaVolume : 1.0}
+                onEnded={() => {
+                  notifyPageMediaEnded(el.id)
+                  handleMediaEnded()
+                }}
                 style={{ objectFit: el.fit || 'contain' }}
               />
             )}
@@ -2464,6 +3895,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
                 }}
                 onError={handleMediaError}
                 onEnded={(ev) => {
+                  notifyPageMediaEnded(el.id)
                   clearTimeout(playDurationTimers.current[el.id])
                   const med = /** @type {HTMLVideoElement} */(ev.target)
                   if (el.playCount && el.playCount > 1) {
@@ -2493,7 +3925,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: (!hideMediaCtrls && el.showMediaControls !== false) ? 8 : 0, boxSizing: 'border-box' }}>
                 {(!hideMediaCtrls && el.showMediaControls !== false) ? (
                   /* Controls visible — render full-width audio player */
-                  <audio src={el.file} autoPlay={el.onPlayMode !== 'click' && el.onPlayMode !== 'click-next' && el.onPlayMode !== 'hover' && el.onPlayMode !== 'after-element' && el.onPlayMode !== 'delay' && el.normalStatePlayTrigger !== 'click' && el.normalStatePlayTrigger !== 'hover'}
+                  <audio src={el.file} autoPlay={!el.pageAudioLane && el.onPlayMode !== 'click' && el.onPlayMode !== 'click-next' && el.onPlayMode !== 'hover' && el.onPlayMode !== 'after-element' && el.onPlayMode !== 'delay' && el.normalStatePlayTrigger !== 'click' && el.normalStatePlayTrigger !== 'hover'}
                     loop={el.playCount ? false : (el.playDurationMs ? false : !!el.loop)}
                     muted={!!el.mediaMuted}
                     controls
@@ -2508,6 +3940,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
                     }}
                     onError={handleMediaError}
                     onEnded={(ev) => {
+                      notifyPageMediaEnded(el.id)
                       clearTimeout(playDurationTimers.current[el.id])
                       const aud = /** @type {HTMLAudioElement} */(ev.target)
                       if (el.playCount && el.playCount > 1) {
@@ -2524,7 +3957,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
                 ) : (
                   /* Controls hidden — invisible audio + clean icon frame */
                   <>
-                    <audio src={el.file} autoPlay={el.onPlayMode !== 'click' && el.onPlayMode !== 'click-next' && el.onPlayMode !== 'hover' && el.onPlayMode !== 'after-element' && el.onPlayMode !== 'delay' && el.normalStatePlayTrigger !== 'click' && el.normalStatePlayTrigger !== 'hover'}
+                    <audio src={el.file} autoPlay={!el.pageAudioLane && el.onPlayMode !== 'click' && el.onPlayMode !== 'click-next' && el.onPlayMode !== 'hover' && el.onPlayMode !== 'after-element' && el.onPlayMode !== 'delay' && el.normalStatePlayTrigger !== 'click' && el.normalStatePlayTrigger !== 'hover'}
                       loop={el.playCount ? false : (el.playDurationMs ? false : !!el.loop)}
                       muted={!!el.mediaMuted}
                       ref={(a) => { if (a && el.mediaVolume != null) a.volume = el.mediaVolume }}
@@ -2538,6 +3971,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
                       }}
                       onError={handleMediaError}
                       onEnded={(ev) => {
+                        notifyPageMediaEnded(el.id)
                         clearTimeout(playDurationTimers.current[el.id])
                         const aud = /** @type {HTMLAudioElement} */(ev.target)
                         if (el.playCount && el.playCount > 1) {
@@ -2565,7 +3999,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
                 label={el.mediaName || 'MIDI'}
                 onError={handleMediaError}
                 showControls={!hideMediaCtrls && el.showMediaControls !== false}
-                autoPlay={hideMediaCtrls || el.showMediaControls === false || el.onPlayMode !== 'click'}
+                autoPlay={!el.pageAudioLane && (hideMediaCtrls || el.showMediaControls === false || el.onPlayMode !== 'click')}
               />
             )}
             {el.file && kind === 'pdf' && (
@@ -2645,7 +4079,10 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
 
       if (el.type === 'button') {
         const animStyle = getAnimStyle(el)
-        return <ButtonEl key={el.id} el={el} elStyle={{...elStyle, ...animStyle}} ws={ws} onClick={(e) => handleElClick(e, el)} />
+        const renderedButton = (ov.text != null || ov.imageSrc != null)
+          ? { ...el, label: ov.text ?? el.label, btnImage: ov.imageSrc ?? el.btnImage }
+          : el
+        return <ButtonEl key={el.id} el={renderedButton} elStyle={{...elStyle, ...animStyle}} ws={ws} onClick={(e) => handleElClick(e, el)} />
       }
 
       if (el.type === 'mpeg') {
@@ -2961,6 +4398,15 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
 
   if (!page) return null
   const prevPage = prevIdx >= 0 ? pages[prevIdx] : null
+  const bgFit = 'fill'
+  const bgStyle = /** @type {import('react').CSSProperties} */ ({
+    position: 'absolute',
+    inset: 0,
+    width: '100%',
+    height: '100%',
+    objectFit: bgFit,
+    pointerEvents: 'none',
+  })
 
   return (
     <div className="presenter-overlay" ref={overlayRef}>
@@ -2989,11 +4435,11 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
         {prevPage && (
           <div className="presenter-page-layer" style={{ background: pageBgCss(prevPage), zIndex: 1 }}>
             {prevPage.bgMediaSrc && prevPage.bgMediaKind === 'video' ? (
-              <video src={prevPage.bgMediaSrc} autoPlay muted loop playsInline style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />
+              <video src={prevPage.bgMediaSrc} autoPlay muted loop playsInline style={bgStyle} />
             ) : prevPage.bgMediaSrc ? (
-              <img src={prevPage.bgMediaSrc} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />
+              <img src={prevPage.bgMediaSrc} alt="" style={bgStyle} />
             ) : prevPage.bgImage ? (
-              <img src={prevPage.bgImage} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />
+              <img src={prevPage.bgImage} alt="" style={bgStyle} />
             ) : null}
             {renderElements(prevPage, false)}
           </div>
@@ -3012,11 +4458,11 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
             />
           ) : page.bgMediaSrc && page.bgMediaKind === 'video' ? (
-            <video src={page.bgMediaSrc} autoPlay muted loop playsInline className={bgMediaTransitionClass(page)} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />
+            <video src={page.bgMediaSrc} autoPlay muted loop playsInline className={bgMediaTransitionClass(page)} style={bgStyle} />
           ) : page.bgMediaSrc ? (
-            <img src={page.bgMediaSrc} alt="" className={bgMediaTransitionClass(page)} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />
+            <img src={page.bgMediaSrc} alt="" className={bgMediaTransitionClass(page)} style={bgStyle} />
           ) : page.bgImage ? (
-            <img src={page.bgImage} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />
+            <img src={page.bgImage} alt="" style={bgStyle} />
           ) : null}
         </div>
         {/* Current page elements — keyed to pageKey so CSS animations reset on each visit */}
@@ -3042,7 +4488,7 @@ function PresentationPlayer({ pages, stage, startIdx, onClose, loop, onNavigate,
         </div>
       )}
 
-      {(showControls !== false && !interactive) && (
+      {showControls !== false && (
         <div className="presenter-controls" onClick={(e) => e.stopPropagation()}>
           <button onClick={() => navigate(idx - 1)} disabled={idx <= 0}>‹ Prev</button>
           <span className="presenter-info">
@@ -3261,6 +4707,62 @@ function SpreadGhostStage({ page, pageNum, stageWidth, stageHeight, zoom, onClic
   )
 }
 
+const TEXT_STYLE_KEYS = [
+  'font', 'size', 'weight', 'color', 'align', 'vAlign',
+  'shadow', 'outline', 'outlineColor', 'italic', 'underline',
+  'bgColor', 'bgOn', 'textStyle', 'textStyleColor1', 'textStyleColor2',
+  'textStyleImage', 'textScrollable', 'ttsVoiceId', 'ttsVoiceLabel', 'ttsRate',
+]
+
+function pickTextStyle(el = {}) {
+  const style = {}
+  for (const key of TEXT_STYLE_KEYS) {
+    if (el[key] !== undefined) style[key] = el[key]
+  }
+  return style
+}
+
+function estimateTextBoxSize(text = 'Text', size = 36, stageWidth = 1280) {
+  const cleanText = String(text || 'Text')
+  const lines = cleanText.split(/\r?\n/)
+  const longest = lines.reduce((max, line) => Math.max(max, line.length), 1)
+  const width = Math.min(Math.max(80, Math.ceil(longest * Number(size || 36) * 0.62) + 28), Math.max(120, stageWidth - 40))
+  const height = Math.max(42, Math.ceil(lines.length * Number(size || 36) * 1.35) + 16)
+  return { w: width, h: height }
+}
+
+function parsePronunciationRules(raw = '') {
+  return String(raw || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => {
+      const parts = line.split(/\s*(?:=>|->|=)\s*/)
+      if (parts.length < 2) return null
+      const from = parts[0]?.trim()
+      const to = parts.slice(1).join('=>').trim()
+      return from && to ? { from, to } : null
+    })
+    .filter(Boolean)
+}
+
+function applyPronunciationRules(text = '', rawRules = '') {
+  let out = String(text || '')
+  for (const rule of parsePronunciationRules(rawRules)) {
+    const escaped = rule.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    out = out.replace(new RegExp(escaped, 'gi'), (match) => {
+      if (match === match.toUpperCase()) return rule.to.toUpperCase()
+      if (match[0] === match[0]?.toUpperCase()) return rule.to.charAt(0).toUpperCase() + rule.to.slice(1)
+      return rule.to
+    })
+  }
+  return out
+}
+
+function combinePronunciationRules(projectRules = '', localRules = '') {
+  return [projectRules, localRules].map((v) => String(v || '').trim()).filter(Boolean).join('\n')
+}
+
 /* ─── App ──────────────────────────────────────────────────────────────── */
 function App() {
   const [pages, setPages] = /** @type {[import('./types/desktop-api').SmmPage[], import('react').Dispatch<import('react').SetStateAction<import('./types/desktop-api').SmmPage[]>>]} */ (useState(seedPages))
@@ -3280,14 +4782,18 @@ function App() {
   const DEFAULT_PRES_AUDIO = { file: '', name: '', volume: 1, loop: true, sourcePath: '', trimStart: 0, trimEnd: null, offset: 0, playbackRate: 1 }
   const [presentationAudio, setPresentationAudio] = useState(DEFAULT_PRES_AUDIO)
   const [showPiperTTS, setShowPiperTTS] = useState(false)
+  const [selectedTextTtsLane, setSelectedTextTtsLane] = useState(1)
+  const [pageAudioTtsLane, setPageAudioTtsLane] = useState(null)
   const [showWhisper, setShowWhisper] = useState(false)
   const [showKaraokeResync, setShowKaraokeResync] = useState(false)
+  const [pageAudioWordSyncId, setPageAudioWordSyncId] = useState('')
   const [showHFSettings, setShowHFSettings] = useState(false)
   const [showLyricWizard, setShowLyricWizard] = useState(false)
   const [showScriptExportModal, setShowScriptExportModal] = useState(false)
   const [showSettingsDlg, setShowSettingsDlg] = useState(false)
   const [appSettings, setAppSettingsState] = useState(loadAppSettings)
   const [lastUsedColor, setLastUsedColor] = useState('#3cb8be')
+  const [textDefaults, setTextDefaults] = useState(() => pickTextStyle(makeElem('text', 0, 0, 200, 60)))
   const [hotspotShape, setHotspotShape] = useState('rect')  // active shape for hotspot draw tool
   const [hsDrawing, setHsDrawing] = useState(null)          // {x0,y0,x1,y1} live drag rect
   const [hsFreehandPts, setHsFreehandPts] = useState([])    // [{x,y}] for freehand polygon
@@ -3312,9 +4818,11 @@ function App() {
   const [scriptText, setScriptText] = useState('')
   const [showVarEditor, setShowVarEditor] = useState(false)
   const [projectVars, setProjectVars] = useState([])
+  const [projectPronunciationRules, setProjectPronunciationRules] = useState('')
   const [playIdx, setPlayIdx] = useState(-1)
   const [mediaBackends, setMediaBackends] = useState(null)
   const [mediaCacheInfo, setMediaCacheInfo] = useState(null)
+  const timelinePreviewAudioRef = useRef(null)
   const [mediaCacheBusy, setMediaCacheBusy] = useState(false)
   const [mediaEvents, setMediaEvents] = useState([])
   const [btnEditor, setBtnEditor] = useState({ open: false, elId: null, data: null })
@@ -3381,6 +4889,7 @@ function App() {
   })
   const [playerCurIdx, setPlayerCurIdx] = useState(-1) // page index PresentationPlayer is on
   const [newProjectDlg, setNewProjectDlg] = useState(false)
+  const [importTemplateDlg, setImportTemplateDlg] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [inlineEditId, setInlineEditId] = useState(null)
   const preClickSelRef = useRef(null)  // tracks selection state before mousedown (for click-to-edit)
@@ -3564,12 +5073,12 @@ function App() {
     const ms = autoSaveInterval * 60_000
     const id = setInterval(() => {
       try {
-        const mmeText = genMME(pages, stage, { presentationAudio, projectVars })
+        const mmeText = genMME(pages, stage, { presentationAudio, projectVars, pronunciationRules: projectPronunciationRules })
         desktopApi.autoSaveMme(mmeText, filename || 'Untitled.mme').catch(() => {})
       } catch { /* ignore serialisation errors */ }
     }, ms)
     return () => clearInterval(id)
-  }, [pages, stage, desktopApi, autoSaveInterval, filename, presentationAudio, projectVars])
+  }, [pages, stage, desktopApi, autoSaveInterval, filename, presentationAudio, projectVars, projectPronunciationRules])
 
   // Persist inner split sizes when they change
   useEffect(() => {
@@ -3584,6 +5093,100 @@ function App() {
 
 
   const pickFile = useCallback((category) => new Promise((resolve) => {
+    const resolvePickedNativePath = async (rawPath, sourceName) => {
+      if (!rawPath) return null
+      const kind = category === 'all' ? detectMediaKind(sourceName || rawPath) : category
+      let capability = inferMediaCapability(sourceName || rawPath, kind)
+      if (desktopApi?.mediaCapability) {
+        try {
+          capability = await desktopApi.mediaCapability({ filePath: rawPath, fileName: sourceName }) || capability
+        } catch { /* use inferred capability */ }
+      }
+
+      let sourcePath = rawPath
+      let finalName = sourceName || rawPath.split(/[/\\]/).pop() || 'media'
+      let finalKind = capability?.category || kind
+
+      if (
+        desktopApi?.transcodeMedia &&
+        (capability?.support === 'convert-required' || capability?.support === 'partial')
+      ) {
+        try {
+          setStatus(`Converting: ${finalName}...`)
+          const transcode = await desktopApi.transcodeMedia({
+            filePath: rawPath,
+            category: finalKind,
+            support: capability.support,
+            extension: capability.extension,
+          })
+          if (transcode?.ok && transcode.convertedPath) {
+            sourcePath = transcode.convertedPath
+            finalName = sourcePath.split(/[/\\]/).pop() || finalName
+            finalKind = detectMediaKind(sourcePath)
+            capability = {
+              ...capability,
+              support: 'native',
+              reason: `Converted to ${transcode.outputHint || 'runtime format'}`,
+              outputHint: transcode.outputHint || null,
+              extension: getMediaExtension(sourcePath),
+              category: finalKind,
+            }
+          } else if (capability.support === 'convert-required') {
+            setStatus(`Media conversion failed: ${finalName}`)
+            return null
+          }
+        } catch {
+          if (capability.support === 'convert-required') {
+            setStatus(`Media conversion failed: ${finalName}`)
+            return null
+          }
+        }
+      }
+
+      finalKind = capability?.category || finalKind
+      if (finalKind === 'audio' || finalKind === 'video' || finalKind === 'pdf') {
+        return {
+          url: makeAppMediaUrl(sourcePath),
+          name: finalName,
+          sourcePath,
+          mediaKind: finalKind,
+          mediaSupport: capability?.support || '',
+          mediaReason: capability?.reason || '',
+          mediaExt: getMediaExtension(sourcePath),
+        }
+      }
+
+      if (desktopApi?.readMediaDataUrl) {
+        try {
+          const loaded = await desktopApi.readMediaDataUrl({ filePath: sourcePath, category: 'image' })
+          if (loaded?.ok && loaded.dataUrl) {
+            return {
+              url: internDataUrl(loaded.dataUrl, sourcePath),
+              name: finalName,
+              sourcePath,
+              mediaKind: 'image',
+              mediaSupport: capability?.support || '',
+              mediaReason: capability?.reason || '',
+              mediaExt: getMediaExtension(sourcePath),
+            }
+          }
+        } catch { /* fall through */ }
+      }
+
+      return null
+    }
+
+    if (desktopApi?.selectMedia) {
+      desktopApi.selectMedia({ category, title: category === 'audio' ? 'Select audio file' : 'Select media file' })
+        .then(async (picked) => {
+          if (!picked || picked.canceled || !picked.filePath) { resolve(null); return }
+          const resolved = await resolvePickedNativePath(picked.filePath, picked.fileName || picked.filePath.split(/[/\\]/).pop() || '')
+          resolve(resolved)
+        })
+        .catch(() => resolve(null))
+      return
+    }
+
     if (!imgRef.current) { resolve(null); return }
     imgRef.current.value = ''
     imgRef.current.accept =
@@ -3597,6 +5200,14 @@ function App() {
       const rawPath = typeof f.path === 'string' ? f.path : ''
       const kind = detectMediaKind(f.name)
       let url = ''
+      if (rawPath) {
+        const resolved = await resolvePickedNativePath(rawPath, f.name)
+        if (resolved?.url) {
+          inp.value = ''
+          resolve(resolved)
+          return
+        }
+      }
       if (rawPath && desktopApi?.readMediaDataUrl && kind !== 'video') {
         try {
           const loaded = await desktopApi.readMediaDataUrl({ filePath: rawPath, category: kind })
@@ -3621,6 +5232,408 @@ function App() {
     () => currentPage?.elements.find((el) => el.id === selId) || null,
     [currentPage, selId],
   )
+  const selectedTextEls = useMemo(() => {
+    const ids = new Set((selIds?.length ? selIds : selId ? [selId] : []).filter(Boolean))
+    return (currentPage?.elements || [])
+      .filter((el) => ids.has(el.id) && el.type === 'text' && String(el.content || '').trim())
+      .sort((a, b) => (Number(a.y) - Number(b.y)) || (Number(a.x) - Number(b.x)))
+  }, [currentPage, selId, selIds])
+  const selectedTextBatch = useMemo(() => (
+    selectedTextEls.length > 1
+      ? selectedTextEls.map((el) => ({
+          id: el.id,
+          text: applyPronunciationRules(el.content || '', combinePronunciationRules(projectPronunciationRules, el.pronunciationRules)),
+          label: el.elLabel || '',
+          voiceId: el.ttsVoiceId || '',
+          voiceLabel: el.ttsVoiceLabel || '',
+          rate: Number(el.ttsRate) || 1,
+        }))
+      : []
+  ), [selectedTextEls, projectPronunciationRules])
+  useEffect(() => {
+    if (selectedEl?.type === 'text') setTextDefaults((prev) => ({ ...prev, ...pickTextStyle(selectedEl) }))
+  }, [selectedEl])
+
+  function updateSelectedTextVoice(patch) {
+    const ids = selectedTextEls.length > 1 ? selectedTextEls.map((el) => el.id) : selectedEl?.type === 'text' ? [selectedEl.id] : []
+    if (!ids.length) return
+    setTextDefaults((prev) => ({ ...prev, ...patch }))
+    if (ids.length === 1) {
+      updateElement(patch)
+      return
+    }
+    pushHistory(true)
+    const idSet = new Set(ids)
+    setPages((prev) => prev.map((pg, i) => i === cur ? {
+      ...pg,
+      elements: (pg.elements || []).map((el) => idSet.has(el.id) ? { ...el, ...patch } : el),
+    } : pg))
+  }
+  const pageAudioElementsByLane = useMemo(() => {
+    const lanes = { background: [], 1: [], 2: [] }
+    ;(currentPage?.elements || []).forEach((el) => {
+      const lane = Number(el.pageAudioLane || 0)
+      const isAudio = el.file && (el.mediaKind === 'audio' || /\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(String(el.file || el.mediaName || '')))
+      if (isAudio && (el.pageAudioRole === 'background-sound' || el.isPageBackgroundSound)) {
+        lanes.background.push(el)
+        return
+      }
+      if ((lane === 1 || lane === 2) && el.file && (el.mediaKind === 'audio' || /\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(String(el.file || el.mediaName || '')))) {
+        lanes[lane].push(el)
+      }
+    })
+    return lanes
+  }, [currentPage])
+
+  const makePageAudioElement = useCallback((lane, clip, z = 0) => {
+    const safeLane = lane === 2 ? 2 : 1
+    const clipId = clip.id || uid()
+    const name = clip.name || `Page Audio ${safeLane}`
+    const textPreview = String(clip.textPreview || '').trim()
+    const labelText = textPreview ? textPreview.slice(0, 36) : name
+    const offset = Number(clip.offset ?? clip.pageAudioOffset) || 0
+    const y = Math.min(stageHeight - 32, 20 + (safeLane - 1) * 40)
+    return {
+      ...makeElem('clip', 20, y, 260, 32),
+      id: clipId,
+      file: clip.file || '',
+      mediaKind: 'audio',
+      mediaName: name,
+      mediaSourcePath: clip.sourcePath || clip.mediaSourcePath || '',
+      mediaExt: 'wav',
+      duration: Number(clip.duration ?? clip.mediaDuration) || 0,
+      elLabel: `PAGE AUDIO ${safeLane} - ${labelText}`,
+      audioHidden: true,
+      showMediaControls: false,
+      onPlayMode: 'click',
+      autoPlay: clip.autoPlay !== false,
+      pageAudioLane: safeLane,
+      pageAudioOffset: offset,
+      mediaStartTime: offset,
+      isNarrationClip: true,
+      sourceTextElementId: clip.textElementId || clip.sourceTextElementId || '',
+      textPreview,
+      wordTimestamps: Array.isArray(clip.wordTimestamps) ? clip.wordTimestamps : [],
+      ttsVoiceId: clip.voiceId || clip.ttsVoiceId || '',
+      ttsVoiceLabel: clip.voiceLabel || clip.ttsVoiceLabel || '',
+      ttsRate: Number(clip.rate ?? clip.ttsRate) || 1,
+      z,
+    }
+  }, [stageHeight])
+
+  const makePageBackgroundSoundElement = useCallback((sound, z = 0, existing = null) => {
+    const name = sound?.name || existing?.mediaName || 'Page Background Sound'
+    const sourcePath = sound?.sourcePath || existing?.mediaSourcePath || ''
+    const offset = Number(sound?.pageAudioOffset ?? sound?.offset ?? sound?.mediaStartTime ?? existing?.pageAudioOffset ?? existing?.mediaStartTime) || 0
+    const y = Math.min(stageHeight - 32, 100)
+    return {
+      ...makeElem('clip', 20, y, 300, 32),
+      ...(existing || {}),
+      id: existing?.id || sound?.elementId || uid(),
+      file: sound?.file || existing?.file || '',
+      mediaKind: 'audio',
+      mediaName: name,
+      mediaSourcePath: sourcePath,
+      mediaExt: getMediaExtension(sourcePath || name) || existing?.mediaExt || 'audio',
+      elLabel: `PAGE BACKGROUND SOUND - ${name}`,
+      audioHidden: true,
+      showMediaControls: false,
+      onPlayMode: 'auto',
+      autoPlay: sound?.autoPlay !== false,
+      loop: !!(sound?.loops ?? sound?.loop ?? existing?.loop),
+      volume: Number(sound?.volume ?? existing?.volume ?? 1),
+      pageAudioLane: undefined,
+      pageAudioRole: 'background-sound',
+      isPageBackgroundSound: true,
+      pageAudioOffset: offset,
+      mediaStartTime: offset,
+      z,
+    }
+  }, [stageHeight])
+
+  const upsertPageBackgroundSound = useCallback((pg, soundPatch) => {
+    const nextSound = { ...(pg.sound || {}), ...(soundPatch || {}) }
+    const elements = [...(pg.elements || [])]
+    const idx = elements.findIndex((el) => el?.pageAudioLane === 'background' || el?.pageAudioRole === 'background-sound' || el?.isPageBackgroundSound)
+    if (!nextSound.file) {
+      if (idx >= 0) elements.splice(idx, 1)
+      return { ...pg, sound: nextSound, elements }
+    }
+    const nextEl = makePageBackgroundSoundElement(nextSound, idx >= 0 ? elements[idx].z : elements.length, idx >= 0 ? elements[idx] : null)
+    if (idx >= 0) elements[idx] = nextEl
+    else elements.push(nextEl)
+    return { ...pg, sound: nextSound, elements }
+  }, [makePageBackgroundSoundElement])
+
+  const estimatePageAudioDuration = useCallback((clip) => {
+    const explicit = Number(clip?.duration ?? clip?.mediaDuration)
+    if (Number.isFinite(explicit) && explicit > 0) return explicit
+    const wordCount = String(clip?.textPreview || clip?.content || clip?.name || '').trim().split(/\s+/).filter(Boolean).length
+    return wordCount ? Math.max(1.2, wordCount / 2.4) : 1.5
+  }, [])
+
+  const pageAudioClipEnd = useCallback((clip) => {
+    const offset = Number(clip?.pageAudioOffset ?? clip?.mediaStartTime ?? clip?.offset) || 0
+    return offset + estimatePageAudioDuration(clip)
+  }, [estimatePageAudioDuration])
+
+  const ensurePauseTimingForPageAudio = useCallback((pg) => {
+    if (pg?.timing?.mode !== 'pause') return pg
+    const audioEnd = (pg.elements || [])
+      .filter((el) => {
+        const lane = Number(el?.pageAudioLane || 0)
+        return (lane === 1 || lane === 2) && el?.file
+      })
+      .reduce((max, el) => Math.max(max, pageAudioClipEnd(el)), 0)
+    if (audioEnd <= 0) return pg
+    const currentSeconds = Number(pg.timing?.durationMs) > 0
+      ? Number(pg.timing.durationMs) / 1000
+      : Number(pg.timing?.duration) || 0
+    if (audioEnd <= currentSeconds + 0.001) return pg
+    return {
+      ...pg,
+      timing: {
+        ...(pg.timing || {}),
+        ...timingPatchFromSeconds(audioEnd),
+      },
+    }
+  }, [pageAudioClipEnd])
+
+  const nextPageAudioAppendOffset = useCallback((pg) => {
+    return (pg?.elements || [])
+      .filter((el) => {
+        const lane = Number(el?.pageAudioLane || 0)
+        return (lane === 1 || lane === 2) && el?.file
+      })
+      .reduce((max, el) => Math.max(max, pageAudioClipEnd(el)), 0)
+  }, [pageAudioClipEnd])
+
+  const appendPageAudioClip = useCallback((lane, clip) => {
+    const safeLane = lane === 2 ? 2 : 1
+    const requestedOffset = clip?.offset ?? clip?.pageAudioOffset ?? clip?.mediaStartTime
+    const hasExplicitOffset = requestedOffset != null && Number(requestedOffset) > 0
+    let newEl = null
+    pushHistory(true)
+    setPages((prev) => prev.map((pg, i) => {
+      if (i !== cur) return pg
+      const nextOffset = hasExplicitOffset
+        ? Number(requestedOffset) || 0
+        : nextPageAudioAppendOffset(pg)
+      newEl = makePageAudioElement(safeLane, {
+        ...clip,
+        offset: nextOffset,
+        duration: estimatePageAudioDuration(clip),
+      })
+      return ensurePauseTimingForPageAudio({
+        ...pg,
+        elements: [...(pg.elements || []), { ...newEl, z: (pg.elements || []).length }],
+      })
+    }))
+    if (!newEl) return
+    setSelId(newEl.id)
+    setSelIds([newEl.id])
+    setInspectorTab('props')
+  }, [cur, ensurePauseTimingForPageAudio, estimatePageAudioDuration, makePageAudioElement, nextPageAudioAppendOffset])
+
+  const previewTimelineAudioClip = useCallback((clip) => {
+    const source = clip?.file || clip?.sourcePath || ''
+    if (!source) return
+    try {
+      if (timelinePreviewAudioRef.current) {
+        timelinePreviewAudioRef.current.pause()
+        timelinePreviewAudioRef.current = null
+      }
+      const url = /^(https?:|data:|blob:|app-media:)/i.test(source) ? source : makeAppMediaUrl(source)
+      const audio = new Audio(url)
+      audio.currentTime = Number(clip.trimStart) || 0
+      audio.volume = Math.max(0, Math.min(1, Number(clip.volume ?? 1)))
+      timelinePreviewAudioRef.current = audio
+      audio.play().catch(() => {})
+      setStatus(`Previewing audio: ${clip.name || clip.mediaName || clip.elLabel || 'clip'}`)
+    } catch {
+      setStatus('Could not preview this audio clip')
+    }
+  }, [])
+
+  const stopTimelineAudioPreview = useCallback(() => {
+    if (timelinePreviewAudioRef.current) {
+      try { timelinePreviewAudioRef.current.pause(); timelinePreviewAudioRef.current.src = '' } catch { /* noop */ }
+      timelinePreviewAudioRef.current = null
+    }
+  }, [])
+
+  const appendPageAudioClipsSequential = useCallback((lane, clips, gapSec = 0.35) => {
+    const safeLane = lane === 2 ? 2 : 1
+    const cleanClips = (clips || []).filter((clip) => clip?.file)
+    if (!cleanClips.length) return
+    pushHistory(true)
+    const newEls = []
+    setPages((prev) => prev.map((pg, i) => {
+      if (i !== cur) return pg
+      let offset = nextPageAudioAppendOffset(pg)
+      const baseZ = (pg.elements || []).length
+      const created = cleanClips.map((clip, idx) => {
+        const duration = estimatePageAudioDuration(clip)
+        const relativeOffset = Number(clip.offset ?? clip.pageAudioOffset ?? clip.mediaStartTime) || 0
+        const el = makePageAudioElement(safeLane, { ...clip, offset: offset + relativeOffset, duration }, baseZ + idx)
+        newEls.push(el)
+        offset += relativeOffset + duration + gapSec
+        return el
+      })
+      return ensurePauseTimingForPageAudio({
+        ...pg,
+        elements: [...(pg.elements || []), ...created],
+      })
+    }))
+    if (newEls.length) {
+      setSelId(newEls[0].id)
+      setSelIds(newEls.map((el) => el.id))
+      setInspectorTab('props')
+    }
+  }, [cur, ensurePauseTimingForPageAudio, estimatePageAudioDuration, makePageAudioElement, nextPageAudioAppendOffset])
+
+  const piperPayloadToPageAudioClip = useCallback((payload, fallbackTextEl) => {
+    const { path: wavPath, name: wavName } = payload || {}
+    const port = window.smmDesktop?.mediaServerPort || 0
+    if (!port || !wavPath) return null
+    const duration = Number(payload?.duration ?? payload?.mediaDuration) || 0
+    return {
+      file: `http://127.0.0.1:${port}/?p=${encodeURIComponent(wavPath)}`,
+      name: wavName,
+      sourcePath: wavPath,
+      autoPlay: true,
+      duration: duration || undefined,
+      mediaDuration: duration || undefined,
+      offset: 0,
+      textElementId: payload?.textElementId || fallbackTextEl?.id || '',
+      textPreview: String(payload?.textPreview || fallbackTextEl?.content || '').slice(0, 120),
+      wordTimestamps: Array.isArray(payload?.wordTimestamps) ? payload.wordTimestamps : [],
+      voiceId: payload?.voiceId || fallbackTextEl?.ttsVoiceId || '',
+      voiceLabel: payload?.voiceLabel || fallbackTextEl?.ttsVoiceLabel || '',
+      rate: payload?.rate || fallbackTextEl?.ttsRate || 1,
+    }
+  }, [])
+
+  const syncPageAudioClipWords = useCallback(async (lane, clip, sourceKind = 'element') => {
+    const safeLane = lane === 2 ? 2 : 1
+    const clipId = String(clip?.id || '')
+    const sourcePath = String(clip?.mediaSourcePath || clip?.sourcePath || '')
+    const clipFile = String(clip?.file || '')
+    const audioUrl = /^(https?:|data:|blob:|app-media:)/i.test(clipFile)
+      ? clipFile
+      : (sourcePath ? makeAppMediaUrl(sourcePath) : clipFile)
+    if (!clipId || !audioUrl) {
+      setStatus('No usable audio source found for this PAGE AUDIO clip.')
+      return
+    }
+
+    setPageAudioWordSyncId(clipId)
+    setStatus(`Transcribing ${clip?.name || clip?.mediaName || `Page Audio ${safeLane}`} for word timing…`)
+    try {
+      const res = await transcribe(audioUrl, {
+        audioFilePath: sourcePath || undefined,
+        model: DEFAULT_WHISPER_MODEL,
+        wordTimestamps: true,
+      })
+      const words = (res.wordTimestamps || [])
+        .map((word) => ({
+          start: Number(word?.start),
+          end: Number(word?.end),
+          text: String(word?.text ?? word?.word ?? ''),
+        }))
+        .filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start && word.text)
+
+      if (!words.length) {
+        setStatus('Whisper returned no word timings for this PAGE AUDIO clip.')
+        return
+      }
+
+      const textPreview = String(res.text || clip?.textPreview || clip?.mediaName || clip?.name || '').trim().slice(0, 120)
+      pushHistory(true)
+      setPages((prev) => prev.map((pg, i) => {
+        if (i !== cur) return pg
+        return {
+          ...pg,
+          elements: (pg.elements || []).map((el) => (
+            sourceKind === 'element' && String(el.id || '') === clipId
+              ? { ...el, wordTimestamps: words, textPreview: textPreview || el.textPreview || '' }
+              : el
+          )),
+          pageAudioClips: (pg.pageAudioClips || []).map((entry) => (
+            sourceKind === 'clip' && String(entry.id || '') === clipId
+              ? { ...entry, wordTimestamps: words, textPreview: textPreview || entry.textPreview || '' }
+              : entry
+          )),
+        }
+      }))
+      setStatus(`Synced ${words.length} word timings for ${clip?.name || clip?.mediaName || `Page Audio ${safeLane}`}`)
+    } catch (err) {
+      setStatus(`PAGE AUDIO word-sync failed: ${String(err?.message || err)}`)
+    } finally {
+      setPageAudioWordSyncId('')
+    }
+  }, [cur, pushHistory, setPages, setStatus])
+
+  useEffect(() => {
+    let changed = false
+    const migrated = pages.map((pg) => {
+      const clips = Array.isArray(pg.pageAudioClips) ? pg.pageAudioClips.filter((clip) => clip?.file) : []
+      if (!clips.length) return pg
+      changed = true
+      const baseZ = (pg.elements || []).length
+      const migratedEls = clips.map((clip, idx) => makePageAudioElement(Number(clip.lane || 1), clip, baseZ + idx))
+      return ensurePauseTimingForPageAudio({
+        ...pg,
+        elements: [...(pg.elements || []), ...migratedEls],
+        pageAudioClips: [],
+      })
+    })
+    if (changed) {
+      setPages(migrated)
+      setStatus('Converted older PAGE AUDIO clips into page elements.')
+    }
+  }, [pages, ensurePauseTimingForPageAudio, makePageAudioElement])
+
+  useEffect(() => {
+    let changed = false
+    const synced = pages.map((pg) => {
+      const nextPg = ensurePauseTimingForPageAudio(pg)
+      if (nextPg !== pg) changed = true
+      return nextPg
+    })
+    if (changed) {
+      setPages(synced)
+      setStatus('Page timing adjusted to match PAGE AUDIO length.')
+    }
+  }, [pages, ensurePauseTimingForPageAudio])
+
+  useEffect(() => {
+    let changed = false
+    const migrated = pages.map((pg) => {
+      const cleanedElements = (pg.elements || []).map((el) => {
+        if (el?.pageAudioRole === 'background-sound' || el?.isPageBackgroundSound) {
+          if (el.pageAudioLane != null) {
+            changed = true
+            const { pageAudioLane, ...rest } = el
+            return rest
+          }
+        }
+        return el
+      })
+      const pageWithCleanedBackgroundSound = cleanedElements === pg.elements ? pg : { ...pg, elements: cleanedElements }
+      if (!pageWithCleanedBackgroundSound?.sound?.file) return pageWithCleanedBackgroundSound
+      const hasBackgroundSoundEl = (pageWithCleanedBackgroundSound.elements || []).some((el) =>
+        el?.pageAudioRole === 'background-sound' || el?.isPageBackgroundSound
+      )
+      if (hasBackgroundSoundEl) return pageWithCleanedBackgroundSound
+      changed = true
+      return upsertPageBackgroundSound(pageWithCleanedBackgroundSound, pageWithCleanedBackgroundSound.sound)
+    })
+    if (changed) {
+      setPages(migrated)
+      setStatus('Converted page background sound into an editable timeline audio element.')
+    }
+  }, [pages, upsertPageBackgroundSound])
 
   const logMediaEvent = useCallback((message) => {
     const line = `${new Date().toISOString()} ${message}`
@@ -3748,7 +5761,10 @@ function App() {
             if (i !== cur) return pg
             const newElements = pg.elements.map((el) =>
               el.id === id
-                ? moveOrResizeElementHelper(el, mode, handle, origX, origY, origW, origH, dx, dy, stageWidth, stageHeight)
+                ? {
+                    ...moveOrResizeElementHelper(el, mode, handle, origX, origY, origW, origH, dx, dy, stageWidth, stageHeight),
+                    ...(mode !== 'move' && el.type === 'text' ? { autoFitText: false } : {}),
+                  }
                 : el,
             )
             if (mode === 'move') {
@@ -3805,16 +5821,24 @@ function App() {
     if (!selectedEl) return
     pushHistory()
     const isLyricContentEdit = 'content' in patch && selectedEl.elLabel === 'lyric'
+    const patchWithSizing = { ...patch }
+    if (selectedEl.type === 'text') {
+      if ('w' in patch || 'h' in patch) patchWithSizing.autoFitText = false
+      if ('content' in patch && selectedEl.autoFitText !== false && !('w' in patch) && !('h' in patch)) {
+        Object.assign(patchWithSizing, estimateTextBoxSize(patch.content, patch.size || selectedEl.size, stageWidth))
+      }
+      setTextDefaults((prev) => ({ ...prev, ...pickTextStyle({ ...selectedEl, ...patchWithSizing }) }))
+    }
     setPages((prev) =>
       prev.map((pg, i) => {
         if (i !== cur) return pg
         const realigned = isLyricContentEdit && pg.wordTimestamps?.length > 0
-          ? realignWordTimestamps(pg.wordTimestamps, patch.content)
+          ? realignWordTimestamps(pg.wordTimestamps, patchWithSizing.content)
           : undefined
         return {
           ...pg,
           ...(realigned !== undefined ? { wordTimestamps: realigned } : {}),
-          elements: pg.elements.map((el) => (el.id === selectedEl.id ? { ...el, ...patch } : el)),
+          elements: pg.elements.map((el) => (el.id === selectedEl.id ? { ...el, ...patchWithSizing } : el)),
         }
       }),
     )
@@ -4259,8 +6283,9 @@ function App() {
   function placeNew(type, px, py) {
     if (!currentPage) return
     pushHistory(true)
+    const textSize = estimateTextBoxSize('Text', textDefaults.size || 36, stageWidth)
     const D = {
-      text: { w: 200, h: 60 },
+      text: textSize,
       clip: { w: 200, h: 150 },
       button: { w: 140, h: 40 },
       mpeg: { w: 320, h: 240 },
@@ -4277,6 +6302,14 @@ function App() {
       d.w,
       d.h,
     )
+    if (rt === 'text') {
+      Object.assign(el, textDefaults, {
+        content: 'Text',
+        autoFitText: true,
+        w: d.w,
+        h: d.h,
+      })
+    }
 
     setPages((prev) =>
       prev.map((pg, i) =>
@@ -4369,10 +6402,19 @@ function App() {
     setSelId(null)
     setSelIds([])
     setFilename('Untitled.mme')
+    setProjectPronunciationRules('')
     setStagePreset(tpl.preset || STAGE_PRESETS[0].key)
     setPages(generateTemplatePages(tpl))
     if (templateId === 'memory-game') {
       setProjectVars(generateMemoryGameVars())
+    } else if (templateId === 'quiz') {
+      setProjectVars(generateQuizVars())
+    } else if (templateId === 'puzzle') {
+      setProjectVars(generatePuzzleVars())
+    } else if (templateId === 'maze-game') {
+      setProjectVars(generateMazeGameVars())
+    } else if (templateId === 'lesson') {
+      setProjectVars(generateLessonVars())
     }
     const isBook = templateId === 'storybook'
     setProjectType(templateId === 'memory-game' ? 'memory-game' : (isBook ? 'storybook' : 'general'))
@@ -4382,6 +6424,29 @@ function App() {
     setNewProjectDlg(false)
     setPresentationAudio(DEFAULT_PRES_AUDIO)
     requestAnimationFrame(() => fitToWindow())
+  }
+
+  function getTemplateProjectVars(templateId) {
+    if (templateId === 'memory-game') return generateMemoryGameVars()
+    if (templateId === 'quiz') return generateQuizVars()
+    if (templateId === 'puzzle') return generatePuzzleVars()
+    if (templateId === 'maze-game') return generateMazeGameVars()
+    if (templateId === 'lesson') return generateLessonVars()
+    return []
+  }
+
+  function prepareTemplateImport(templateId) {
+    const tpl = PROJECT_TEMPLATES.find(t => t.id === templateId)
+    if (!tpl) return
+    const preset = STAGE_PRESETS.find(p => p.key === (tpl.preset || STAGE_PRESETS[0].key)) || STAGE_PRESETS[0]
+    setImportPagesData({
+      pages: generateTemplatePages(tpl),
+      stage: { width: preset.width, height: preset.height },
+      projectVars: getTemplateProjectVars(templateId),
+      sourceLabel: `Template: ${tpl.label}`,
+    })
+    setImportTemplateDlg(false)
+    setStatus(`Choose pages to import from template: ${tpl.label}`)
   }
 
 
@@ -4397,6 +6462,7 @@ function App() {
         chromaTolerance: null,
         chromaSoftness: null,
         chromaMaskShape: null,
+        chromaSelections: null,
       }),
     })))
     setStatus('Chroma key removed')
@@ -4691,66 +6757,64 @@ function App() {
       return
     }
     let outcome = 'none'
-    setPages((prev) =>
-      prev.map((pg, i) => {
-        if (i !== cur) return pg
-        const sorted = [...pg.elements].sort((a, b) => a.z - b.z)
-        const idx = sorted.findIndex((el) => el.id === selId)
-        if (idx < 0) {
-          outcome = 'missing'
-          return pg
-        }
+    const nextPages = pagesRef.current.map((pg, i) => {
+      if (i !== cur) return pg
+      const sorted = [...pg.elements].sort((a, b) => a.z - b.z)
+      const idx = sorted.findIndex((el) => el.id === selId)
+      if (idx < 0) {
+        outcome = 'missing'
+        return pg
+      }
 
-        if (sorted.length <= 1) {
+      if (sorted.length <= 1) {
+        outcome = 'boundary'
+        return pg
+      }
+
+      if (op === 'top') {
+        if (idx >= sorted.length - 1) {
           outcome = 'boundary'
           return pg
         }
+        const [target] = sorted.splice(idx, 1)
+        sorted.push(target)
+        outcome = 'moved'
+        return { ...pg, elements: reindexZByCurrentOrder(sorted) }
+      }
 
-        if (op === 'top') {
-          if (idx >= sorted.length - 1) {
-            outcome = 'boundary'
-            return pg
-          }
-          const [target] = sorted.splice(idx, 1)
-          sorted.push(target)
-          outcome = 'moved'
-          return { ...pg, elements: reindexZByCurrentOrder(sorted) }
+      if (op === 'bot') {
+        if (idx <= 0) {
+          outcome = 'boundary'
+          return pg
         }
+        const [target] = sorted.splice(idx, 1)
+        sorted.unshift(target)
+        outcome = 'moved'
+        return { ...pg, elements: reindexZByCurrentOrder(sorted) }
+      }
 
-        if (op === 'bot') {
-          if (idx <= 0) {
-            outcome = 'boundary'
-            return pg
-          }
-          const [target] = sorted.splice(idx, 1)
-          sorted.unshift(target)
-          outcome = 'moved'
-          return { ...pg, elements: reindexZByCurrentOrder(sorted) }
+      if (op === 'up') {
+        if (idx >= sorted.length - 1) {
+          outcome = 'boundary'
+          return pg
         }
+        ;[sorted[idx], sorted[idx + 1]] = [sorted[idx + 1], sorted[idx]]
+        outcome = 'moved'
+        return { ...pg, elements: reindexZByCurrentOrder(sorted) }
+      }
 
-        if (op === 'up') {
-          if (idx >= sorted.length - 1) {
-            outcome = 'boundary'
-            return pg
-          }
-          ;[sorted[idx], sorted[idx + 1]] = [sorted[idx + 1], sorted[idx]]
-          outcome = 'moved'
-          return { ...pg, elements: reindexZByCurrentOrder(sorted) }
+      if (op === 'dn') {
+        if (idx <= 0) {
+          outcome = 'boundary'
+          return pg
         }
+        ;[sorted[idx], sorted[idx - 1]] = [sorted[idx - 1], sorted[idx]]
+        outcome = 'moved'
+        return { ...pg, elements: reindexZByCurrentOrder(sorted) }
+      }
 
-        if (op === 'dn') {
-          if (idx <= 0) {
-            outcome = 'boundary'
-            return pg
-          }
-          ;[sorted[idx], sorted[idx - 1]] = [sorted[idx - 1], sorted[idx]]
-          outcome = 'moved'
-          return { ...pg, elements: reindexZByCurrentOrder(sorted) }
-        }
-
-        return pg
-      }),
-    )
+      return pg
+    })
     const labels = {
       top: 'front',
       up: 'up',
@@ -4758,6 +6822,8 @@ function App() {
       bot: 'back',
     }
     if (outcome === 'moved') {
+      pushHistory(true)
+      setPages(nextPages)
       setStatus(`Layer moved ${labels[op]}`)
       return
     }
@@ -4882,19 +6948,44 @@ function App() {
   }, [pages, selectedPageIds])
 
   function alignElement(dir) {
-    const selected = (currentPage?.elements ?? []).filter((el) => selIds.includes(el.id))
+    const activeIds = selIds.length > 0 ? selIds : (selId ? [selId] : [])
+    const selected = (currentPage?.elements ?? []).filter((el) => activeIds.includes(el.id))
     if (selected.length === 0) { setStatus('Select an element first'); return }
+    const multi = selected.length > 1
+    const bounds = multi ? {
+      left: Math.min(...selected.map((el) => el.x)),
+      top: Math.min(...selected.map((el) => el.y)),
+      right: Math.max(...selected.map((el) => el.x + el.w)),
+      bottom: Math.max(...selected.map((el) => el.y + el.h)),
+    } : null
+    if (bounds) {
+      bounds.hcenter = Math.round((bounds.left + bounds.right) / 2)
+      bounds.vcenter = Math.round((bounds.top + bounds.bottom) / 2)
+    }
     const patches = {}
+    let changed = false
     selected.forEach((el) => {
       let x = el.x, y = el.y
-      if (dir === 'left')    x = 0
-      if (dir === 'hcenter') x = Math.round((stageWidth - el.w) / 2)
-      if (dir === 'right')   x = stageWidth - el.w
-      if (dir === 'top')     y = 0
-      if (dir === 'vcenter') y = Math.round((stageHeight - el.h) / 2)
-      if (dir === 'bottom')  y = stageHeight - el.h
+      if (multi && bounds) {
+        if (dir === 'left')    x = bounds.left
+        if (dir === 'hcenter') x = Math.round(bounds.hcenter - el.w / 2)
+        if (dir === 'right')   x = bounds.right - el.w
+        if (dir === 'top')     y = bounds.top
+        if (dir === 'vcenter') y = Math.round(bounds.vcenter - el.h / 2)
+        if (dir === 'bottom')  y = bounds.bottom - el.h
+      } else {
+        if (dir === 'left')    x = 0
+        if (dir === 'hcenter') x = Math.round((stageWidth - el.w) / 2)
+        if (dir === 'right')   x = stageWidth - el.w
+        if (dir === 'top')     y = 0
+        if (dir === 'vcenter') y = Math.round((stageHeight - el.h) / 2)
+        if (dir === 'bottom')  y = stageHeight - el.h
+      }
+      if (x !== el.x || y !== el.y) changed = true
       patches[el.id] = { x, y }
     })
+    if (!changed) { setStatus(`Already aligned: ${dir}`); return }
+    pushHistory(true)
     setPages((prev) => prev.map((pg, i) =>
       i !== cur ? pg : { ...pg, elements: pg.elements.map((el) => patches[el.id] ? { ...el, ...patches[el.id] } : el) }
     ))
@@ -4902,20 +6993,23 @@ function App() {
   }
 
   function nudgeElement(dx, dy) {
-    const selected = (currentPage?.elements ?? []).filter((el) => selIds.includes(el.id))
+    const activeIds = selIds.length > 0 ? selIds : (selId ? [selId] : [])
+    const selected = (currentPage?.elements ?? []).filter((el) => activeIds.includes(el.id))
     if (selected.length === 0) return
+    pushHistory(true)
     setPages((prev) => prev.map((pg, i) =>
       i !== cur ? pg : {
         ...pg,
         elements: pg.elements.map((el) =>
-          selIds.includes(el.id) ? { ...el, x: Math.round(el.x + dx), y: Math.round(el.y + dy) } : el
+          activeIds.includes(el.id) ? { ...el, x: Math.round(el.x + dx), y: Math.round(el.y + dy) } : el
         ),
       }
     ))
   }
 
   function spaceEvenlyH() {
-    const selected = (currentPage?.elements ?? []).filter((el) => selIds.includes(el.id))
+    const activeIds = selIds.length > 0 ? selIds : (selId ? [selId] : [])
+    const selected = (currentPage?.elements ?? []).filter((el) => activeIds.includes(el.id))
     if (selected.length < 3) { setStatus('Select 3+ elements to space evenly'); return }
     const sorted = [...selected].sort((a, b) => a.x - b.x)
     const totalSpan = (sorted[sorted.length - 1].x + sorted[sorted.length - 1].w) - sorted[0].x
@@ -4924,6 +7018,9 @@ function App() {
     let cursor = sorted[0].x
     const newX = {}
     sorted.forEach((el) => { newX[el.id] = Math.round(cursor); cursor += el.w + gap })
+    const changed = sorted.some((el) => newX[el.id] !== el.x)
+    if (!changed) { setStatus('Already spaced evenly horizontal'); return }
+    pushHistory(true)
     setPages((prev) => prev.map((pg, i) =>
       i !== cur ? pg : { ...pg, elements: pg.elements.map((el) => newX[el.id] !== undefined ? { ...el, x: newX[el.id] } : el) }
     ))
@@ -4931,7 +7028,8 @@ function App() {
   }
 
   function spaceEvenlyV() {
-    const selected = (currentPage?.elements ?? []).filter((el) => selIds.includes(el.id))
+    const activeIds = selIds.length > 0 ? selIds : (selId ? [selId] : [])
+    const selected = (currentPage?.elements ?? []).filter((el) => activeIds.includes(el.id))
     if (selected.length < 3) { setStatus('Select 3+ elements to space evenly'); return }
     const sorted = [...selected].sort((a, b) => a.y - b.y)
     const totalSpan = (sorted[sorted.length - 1].y + sorted[sorted.length - 1].h) - sorted[0].y
@@ -4940,6 +7038,9 @@ function App() {
     let cursor = sorted[0].y
     const newY = {}
     sorted.forEach((el) => { newY[el.id] = Math.round(cursor); cursor += el.h + gap })
+    const changed = sorted.some((el) => newY[el.id] !== el.y)
+    if (!changed) { setStatus('Already spaced evenly vertical'); return }
+    pushHistory(true)
     setPages((prev) => prev.map((pg, i) =>
       i !== cur ? pg : { ...pg, elements: pg.elements.map((el) => newY[el.id] !== undefined ? { ...el, y: newY[el.id] } : el) }
     ))
@@ -4974,7 +7075,7 @@ function App() {
       elLabel: '', groupId: '',
       children: els.map((e) => ({ ...e, x: e.x - minX, y: e.y - minY })),
     }
-    pushHistory()
+    pushHistory(true)
     setPages((prev) => prev.map((pgr, i) => i !== cur ? pgr : {
       ...pgr,
       elements: [...pgr.elements.filter((e) => !selIds.includes(e.id)), groupEl],
@@ -4991,7 +7092,7 @@ function App() {
       (pg?.elements ?? []).filter((e) => selIds.includes(e.id) && e.groupId).map((e) => e.groupId)
     )
     if (compositeGroups.length === 0 && legacyGroupIds.size === 0) { setStatus('No grouped elements selected'); return }
-    pushHistory()
+    pushHistory(true)
     const newIds = []
     setPages((prev) => prev.map((pgr, i) => {
       if (i !== cur) return pgr
@@ -5119,6 +7220,17 @@ function App() {
     }
   }, [cur, goToPage, selectedPageIds])
 
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-fluxaura-page-index="${cur}"]`)
+        ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      document
+        .querySelector(`[data-fluxaura-inspector-page-index="${cur}"]`)
+        ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    })
+  }, [cur, pages.length])
+
   function selectTool(nextTool) {
     setTool(nextTool)
   }
@@ -5170,9 +7282,9 @@ function App() {
   }
 
   /**
-   * Parse and apply an SCA script, replacing all pages and stage config.
+   * Parse and apply an MME project script, replacing all pages and stage config.
    * In dev mode also persists to disk auto-save. In prod also persists to localStorage.
-   * @param {string} txt - Raw SCA content
+   * @param {string} txt - Raw MME content
    * @param {string} name - Display filename (e.g. "project.mme")
    * @returns {Promise<boolean>} true on success
    */
@@ -5182,15 +7294,42 @@ function App() {
       setStatus('Parse error - no pages found')
       return false
     }
+    if (parsed.warnings?.length) {
+      console.warn('[FluxAura] parse warnings:', parsed.warnings)
+      setStatus(`Opened with ${parsed.warnings.length} parse warning${parsed.warnings.length !== 1 ? 's' : ''}`)
+    }
     // Restore project variables if saved
     if (parsed.projectVars?.length) setProjectVars(parsed.projectVars)
-    const parsedPresetKey = parsed.stage
-      ? getPresetKey(parsed.stage.width, parsed.stage.height)
-      : STAGE_PRESETS[0].key
+    setProjectPronunciationRules(parsed.pronunciationRules || '')
+    const parsedStageWidth = Math.max(100, Math.min(8000, Math.round(Number(parsed.stage?.width) || STAGE_PRESETS[0].width)))
+    const parsedStageHeight = Math.max(100, Math.min(8000, Math.round(Number(parsed.stage?.height) || STAGE_PRESETS[0].height)))
+    const parsedStagePreset = parsed.stage
+      ? STAGE_PRESETS.find((preset) => preset.width === parsedStageWidth && preset.height === parsedStageHeight)
+      : STAGE_PRESETS[0]
+    const parsedPresetKey = parsedStagePreset?.key || 'custom'
     let resolvedPages = parsed.pages.map((pg) => clampPageToStage(pg))
 
     // Post-load media resolution: attempt to reload media from stored native source paths
     const missingMedia = []
+    const mediaExistsCache = new Map()
+    const mediaPathExists = async (filePath) => {
+      const key = String(filePath || '')
+      if (!key) return false
+      if (mediaExistsCache.has(key)) return mediaExistsCache.get(key)
+      if (!desktopApi?.mediaExists) {
+        mediaExistsCache.set(key, true)
+        return true
+      }
+      try {
+        const result = await desktopApi.mediaExists({ filePath: key })
+        const exists = Boolean(result?.ok && result?.exists)
+        mediaExistsCache.set(key, exists)
+        return exists
+      } catch {
+        mediaExistsCache.set(key, false)
+        return false
+      }
+    }
     if (desktopApi?.readMediaDataUrl) {
       resolvedPages = await Promise.all(resolvedPages.map(async (pg) => ({
         ...pg,
@@ -5203,6 +7342,10 @@ function App() {
           if (kind === 'video' && srcPath && typeof srcPath === 'string') {
             const isRealPath = srcPath.includes('/') || srcPath.includes('\\') || /^[a-zA-Z]:/.test(srcPath)
             if (isRealPath) {
+              if (!(await mediaPathExists(srcPath))) {
+                missingMedia.push(el.mediaName || srcPath)
+                return el
+              }
               const fresh = inferMediaCapability(el.mediaName || srcPath, 'video')
               return {
                 ...el,
@@ -5246,6 +7389,10 @@ function App() {
           // For partial-support audio (WAV — may use ADPCM codec not supported by Chromium),
           // transcode to MP3 via ffmpeg for guaranteed compatibility.
           if (kind === 'audio') {
+            if (!(await mediaPathExists(srcPath))) {
+              missingMedia.push(el.mediaName || srcPath)
+              return el
+            }
             const fresh = inferMediaCapability(el.mediaName || srcPath, kind)
             if (fresh.support === 'partial' && desktopApi?.transcodeMedia) {
               try {
@@ -5313,7 +7460,7 @@ function App() {
     }
 
     // Interaction media fields (hoverSoundFile, hoverMediaFile, clickSoundFile, clickMediaFile)
-    // are stored as native filesystem paths in the SCA file. Playback code already resolves
+    // are stored as native filesystem paths in the MME file. Playback code already resolves
     // them on-the-fly via isUnresolvedMediaPath() + makeAppMediaUrl(). We must NOT pre-resolve
     // them here, because that would overwrite native paths with temp HTTP URLs, causing
     // those fields to be silently dropped on the next save (isTempUrl check in genMME).
@@ -5328,6 +7475,15 @@ function App() {
         ? pg.bgMediaSourcePath
         : (pg.bgImage && isUnresolvedMediaPath(pg.bgImage) ? pg.bgImage : null)
       if (!srcPath) return pg // already a URL, data URL, or empty — nothing to do
+      if (!(await mediaPathExists(srcPath))) {
+        unresolvedEls.push({
+          pageIdx: resolvedPages.indexOf(pg), elIdx: -1,
+          field: 'bgMedia',
+          filename: pg.bgMediaName || srcPath.split(/[/\\]/).pop() || srcPath,
+          fullRef: srcPath,
+        })
+        return pg
+      }
       try {
         const kind = pg.bgMediaKind || 'image'
         let url = null
@@ -5357,45 +7513,121 @@ function App() {
       return pg
     }))
 
-    // Scan elements for unresolved file paths
-    bgResolvedPages.forEach((pg, pi) => {
-      ;(pg.elements || []).forEach((el, ei) => {
+    // Re-resolve element media from saved native paths before declaring it missing.
+    const elementResolvedPages = await Promise.all(bgResolvedPages.map(async (pg, pi) => {
+      const elements = await Promise.all((pg.elements || []).map(async (el, ei) => {
         if (el.type === 'clip' || el.type === 'mpeg') {
-          const f = String(el.file || '')
-          if (f && isUnresolvedMediaPath(f)) {
+          const srcPath = el.mediaSourcePath || (el.file && isUnresolvedMediaPath(el.file) ? String(el.file) : '')
+          if (!srcPath) return el
+          if (!(await mediaPathExists(srcPath))) {
             unresolvedEls.push({
               pageIdx: pi, elIdx: ei,
               field: 'file',
-              filename: el.mediaName || f.split(/[/\\]/).pop() || f,
-              fullRef: f,
+              filename: el.mediaName || srcPath.split(/[/\\]/).pop() || srcPath,
+              fullRef: srcPath,
             })
+            return el
           }
-        } else if (el.type === 'button' && el.btnImage && isUnresolvedMediaPath(el.btnImage)) {
-          const f = String(el.btnImage)
-          unresolvedEls.push({
-            pageIdx: pi, elIdx: ei,
-            field: 'btnImage',
-            filename: el.mediaName || f.split(/[/\\]/).pop() || f,
-            fullRef: f,
-          })
+          const mediaKind = el.mediaKind || (/\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(srcPath) ? 'audio' : /\.(mp4|mov|webm|mkv|avi|wmv|flv|m4v|gif|apng)(\?|#|$)/i.test(srcPath) ? 'video' : 'image')
+          if (mediaKind === 'image' && desktopApi?.readMediaDataUrl) {
+            try {
+              const loaded = await desktopApi.readMediaDataUrl({ filePath: srcPath, category: 'image' })
+              if (loaded?.ok && loaded.dataUrl) return { ...el, file: internDataUrl(loaded.dataUrl, srcPath), mediaSourcePath: srcPath, mediaKind }
+            } catch { /* fall through to media server URL */ }
+          }
+          return { ...el, file: makeAppMediaUrl(srcPath), mediaSourcePath: srcPath, mediaKind }
         }
-      })
-    })
+        if (el.type === 'button') {
+          const srcPath = el.btnImageSourcePath || (el.btnImage && isUnresolvedMediaPath(el.btnImage) ? String(el.btnImage) : '')
+          if (!srcPath) return el
+          if (!(await mediaPathExists(srcPath))) {
+            unresolvedEls.push({
+              pageIdx: pi, elIdx: ei,
+              field: 'btnImage',
+              filename: el.mediaName || srcPath.split(/[/\\]/).pop() || srcPath,
+              fullRef: srcPath,
+            })
+            return el
+          }
+          try {
+            const loaded = await desktopApi?.readMediaDataUrl?.({ filePath: srcPath, category: 'image' })
+            if (loaded?.ok && loaded.dataUrl) return { ...el, btnImage: internDataUrl(loaded.dataUrl, srcPath), btnImageSourcePath: srcPath }
+          } catch { /* fall through to media server URL */ }
+          return { ...el, btnImage: makeAppMediaUrl(srcPath), btnImageSourcePath: srcPath }
+        }
+        return el
+      }))
+      return { ...pg, elements }
+    }))
 
     // Re-resolve page background sound from native sourcePath
-    const soundResolvedPages = bgResolvedPages.map((pg) => {
+    const soundResolvedPages = await Promise.all(elementResolvedPages.map(async (pg, pi) => {
       const snd = pg.sound
       if (!snd) return pg
       const srcPath = snd.sourcePath || snd.file || ''
       if (!srcPath) return pg
       const isRealPath = srcPath.includes('/') || srcPath.includes('\\') || /^[a-zA-Z]:/.test(srcPath)
       if (!isRealPath) return pg
+      if (!(await mediaPathExists(srcPath))) {
+        unresolvedEls.push({
+          pageIdx: pi, elIdx: -1,
+          field: 'sound',
+          filename: snd.name || srcPath.split(/[/\\]/).pop() || srcPath,
+          fullRef: srcPath,
+        })
+        return pg
+      }
+      const fresh = inferMediaCapability(snd.name || srcPath, 'audio')
+      if (
+        desktopApi?.transcodeMedia &&
+        (fresh.support === 'convert-required' || fresh.support === 'partial')
+      ) {
+        try {
+          const transcode = await desktopApi.transcodeMedia({
+            filePath: srcPath,
+            category: 'audio',
+            support: fresh.support,
+            extension: fresh.extension,
+          })
+          if (transcode?.ok && transcode.convertedPath) {
+            const convertedPath = transcode.convertedPath
+            return {
+              ...pg,
+              sound: {
+                ...snd,
+                file: makeAppMediaUrl(convertedPath),
+                sourcePath: convertedPath,
+                name: convertedPath.split(/[/\\]/).pop() || snd.name || srcPath.split(/[/\\]/).pop() || '',
+              },
+            }
+          }
+          if (fresh.support === 'convert-required') {
+            unresolvedEls.push({
+              pageIdx: pi, elIdx: -1,
+              field: 'sound',
+              filename: snd.name || srcPath.split(/[/\\]/).pop() || srcPath,
+              fullRef: srcPath,
+            })
+            return pg
+          }
+        } catch {
+          if (fresh.support === 'convert-required') {
+            unresolvedEls.push({
+              pageIdx: pi, elIdx: -1,
+              field: 'sound',
+              filename: snd.name || srcPath.split(/[/\\]/).pop() || srcPath,
+              fullRef: srcPath,
+            })
+            return pg
+          }
+        }
+      }
       return { ...pg, sound: { ...snd, file: makeAppMediaUrl(srcPath), sourcePath: srcPath } }
-    })
+    }))
 
-    // Re-resolve narration from native sourcePath (saved in mme:pgext)
-    const narrationResolvedPages = soundResolvedPages.map((pg) => {
-      const narr = pg.narration
+    // Re-resolve page audio tracks from native sourcePath (saved in mme:pgext)
+    const resolvePageAudioTrack = async (pg, pi, field) => {
+      const narr = pg[field]
       if (!narr) return pg
       // If it's an embedded data URL (TTS without native path) — already playable
       if (narr.file && narr.file.startsWith('data:')) return pg
@@ -5403,8 +7635,40 @@ function App() {
       if (!srcPath) return pg
       const isRealPath = srcPath.includes('/') || srcPath.includes('\\') || /^[a-zA-Z]:/.test(srcPath)
       if (!isRealPath) return pg
-      return { ...pg, narration: { ...narr, file: makeAppMediaUrl(srcPath) } }
-    })
+      if (!(await mediaPathExists(srcPath))) {
+        unresolvedEls.push({
+          pageIdx: pi, elIdx: -1,
+          field,
+          filename: narr.name || srcPath.split(/[/\\]/).pop() || srcPath,
+          fullRef: srcPath,
+        })
+        return pg
+      }
+      return { ...pg, [field]: { ...narr, file: makeAppMediaUrl(srcPath), offset: Number(narr.offset) || 0 } }
+    }
+    const narrationResolvedPages = await Promise.all(soundResolvedPages.map(async (pg, pi) => {
+      const withTrack1 = await resolvePageAudioTrack(pg, pi, 'narration')
+      const withTrack2 = await resolvePageAudioTrack(withTrack1, pi, 'narration2')
+      if (!Array.isArray(withTrack2.pageAudioClips) || !withTrack2.pageAudioClips.length) return withTrack2
+      const clips = await Promise.all(withTrack2.pageAudioClips.map(async (clip, clipIdx) => {
+        if (clip.file?.startsWith('data:')) return clip
+        const srcPath = clip.sourcePath || ''
+        if (!srcPath) return clip
+        const isRealPath = srcPath.includes('/') || srcPath.includes('\\') || /^[a-zA-Z]:/.test(srcPath)
+        if (!isRealPath) return clip
+        if (!(await mediaPathExists(srcPath))) {
+          unresolvedEls.push({
+            pageIdx: pi, elIdx: -1,
+            field: `pageAudioClips.${clipIdx}`,
+            filename: clip.name || srcPath.split(/[/\\]/).pop() || srcPath,
+            fullRef: srcPath,
+          })
+          return clip
+        }
+        return { ...clip, file: makeAppMediaUrl(srcPath), offset: Number(clip.offset) || 0 }
+      }))
+      return { ...withTrack2, pageAudioClips: clips }
+    }))
 
     // Hydrate missing timing objects — old projects may not have timing field
     const hydratedPages = narrationResolvedPages.map((pg) => ({
@@ -5414,6 +7678,10 @@ function App() {
         : { mode: 'wait', duration: 5, ms: 0 },
     }))
     setPages(hydratedPages)
+    if (parsedPresetKey === 'custom') {
+      setCustomStageW(parsedStageWidth)
+      setCustomStageH(parsedStageHeight)
+    }
     setStagePreset(parsedPresetKey)
     setCur(0)
     setSelId(null)
@@ -5436,21 +7704,21 @@ function App() {
 
     if (unresolvedEls.length > 0) {
       setStatus(`Opened: ${name} — ⚠ ${unresolvedEls.length} media file(s) not found — click "Resolve Media" to locate them`)
-      setMediaResolver({ unresolvedEls, resolvedPages: bgResolvedPages, open: true })
+      setMediaResolver({ unresolvedEls, resolvedPages: hydratedPages, open: true })
     } else {
       setStatus(`Opened: ${name} (${parsed.pages.length} pages)`)
     }
-    requestAnimationFrame(() => fitToWindow())
+    fitToWindowAfterLayout(parsedStageWidth, parsedStageHeight)
     return true
   }
 
-  function centreCanvas(newZoom) {
+  function centreCanvas(newZoom, targetWidth = stageWidth, targetHeight = stageHeight) {
     const container = scrollRef.current
     if (!container) return
     // Double-rAF: first rAF lets React/CSS zoom update layout, second reads true dimensions
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      const scaledW = stageWidth * newZoom
-      const scaledH = stageHeight * newZoom
+      const scaledW = targetWidth * newZoom
+      const scaledH = targetHeight * newZoom
       container.scrollLeft = Math.max(0, (scaledW - container.clientWidth) / 2)
       container.scrollTop  = Math.max(0, (scaledH - container.clientHeight) / 2)
     }))
@@ -5466,17 +7734,25 @@ function App() {
     }))
   }
 
-  function fitToWindow() {
+  function fitToWindow(targetWidth = stageWidth, targetHeight = stageHeight) {
     const container = scrollRef.current
     if (!container) return
+    const canvasWidth = Math.max(1, Number(targetWidth) || stageWidth || 1)
+    const canvasHeight = Math.max(1, Number(targetHeight) || stageHeight || 1)
     const pad = 32
     const availW = container.clientWidth - pad
     const availH = container.clientHeight - pad
-    const fitZoom = Math.max(0.1, Math.min(3, Math.min(availW / stageWidth, availH / stageHeight)))
-    const snapped = Math.round(fitZoom * 10) / 10
+    const fitZoom = Math.max(0.1, Math.min(3, Math.min(availW / canvasWidth, availH / canvasHeight)))
+    const snapped = Math.round(fitZoom * 20) / 20
     setZoom(snapped)
     setStatus(`Zoom ${Math.round(snapped * 100)}% (fit)`)
-    centreCanvas(snapped)
+    centreCanvas(snapped, canvasWidth, canvasHeight)
+  }
+
+  function fitToWindowAfterLayout(targetWidth = stageWidth, targetHeight = stageHeight) {
+    const run = () => fitToWindow(targetWidth, targetHeight)
+    requestAnimationFrame(() => requestAnimationFrame(run))
+    ;[120, 350, 800, 1200].forEach((delay) => setTimeout(run, delay))
   }
 
   async function openMmeDesktop() {
@@ -5520,6 +7796,93 @@ function App() {
    * Writes both mme_lastSave and mme_lastOpened in localStorage for recovery.
    * @returns {Promise<boolean>}
    */
+  function isConvertedCachePath(value) {
+    const s = String(value || '')
+    return /[\\/](media-cache)[\\/]/i.test(s)
+  }
+
+  function collectConvertedProjectAssetPaths(pageList, presAudio) {
+    const paths = new Set()
+    const add = (value) => {
+      const s = String(value || '')
+      if (isConvertedCachePath(s)) paths.add(s)
+    }
+    add(presAudio?.sourcePath)
+    ;(pageList || []).forEach((pg) => {
+      add(pg.bgMediaSourcePath)
+      add(pg.sound?.sourcePath)
+      add(pg.narration?.sourcePath)
+      add(pg.narration2?.sourcePath)
+      ;(pg.pageAudioClips || []).forEach((clip) => add(clip?.sourcePath))
+      ;(pg.elements || []).forEach((el) => {
+        add(el.mediaSourcePath)
+        add(el.btnImageSourcePath)
+        add(el.chromaOrigSourcePath)
+      })
+    })
+    return [...paths]
+  }
+
+  function collectGeneratedNarrationAssetPaths(pageList) {
+    const paths = new Set()
+    const add = (value) => {
+      const pathValue = String(value || '')
+      if (!pathValue || /^(https?:|data:|blob:|app-media:)/i.test(pathValue)) return
+      const fileName = pathValue.split(/[/\\]/).pop() || ''
+      if (/^piper[_-].*\.(wav|mp3)$/i.test(fileName) || /[\\/](piper|piper-tts|tts|narration)[\\/]/i.test(pathValue)) {
+        paths.add(pathValue)
+      }
+    }
+    ;(pageList || []).forEach((pg) => {
+      add(pg?.narration?.sourcePath)
+      add(pg?.narration2?.sourcePath)
+      ;(pg?.pageAudioClips || []).forEach((clip) => add(clip?.sourcePath))
+      ;(pg?.elements || []).forEach((el) => {
+        add(el?.mediaSourcePath)
+        add(el?.sourcePath)
+      })
+    })
+    return [...paths]
+  }
+
+  function replaceConvertedProjectAssetPaths(pageList, replacements) {
+    const map = new Map((replacements || []).map((r) => [String(r.from || ''), String(r.to || '')]).filter(([from, to]) => from && to))
+    if (!map.size) return pageList
+    const patchTrack = (track) => {
+      if (!track) return track
+      const nextPath = map.get(String(track.sourcePath || ''))
+      if (!nextPath) return track
+      return { ...track, sourcePath: nextPath, file: makeAppMediaUrl(nextPath) }
+    }
+    return pageList.map((pg) => {
+      const bgPath = map.get(String(pg.bgMediaSourcePath || ''))
+      return {
+        ...pg,
+        ...(bgPath ? { bgMediaSourcePath: bgPath, bgMediaSrc: makeAppMediaUrl(bgPath), bgImage: makeAppMediaUrl(bgPath) } : {}),
+        sound: patchTrack(pg.sound),
+        narration: patchTrack(pg.narration),
+        narration2: patchTrack(pg.narration2),
+        pageAudioClips: (pg.pageAudioClips || []).map(patchTrack),
+        elements: (pg.elements || []).map((el) => {
+          const mediaPath = map.get(String(el.mediaSourcePath || ''))
+          const btnPath = map.get(String(el.btnImageSourcePath || ''))
+          return {
+            ...el,
+            ...(mediaPath ? { mediaSourcePath: mediaPath, file: makeAppMediaUrl(mediaPath) } : {}),
+            ...(btnPath ? { btnImageSourcePath: btnPath, btnImage: makeAppMediaUrl(btnPath) } : {}),
+          }
+        }),
+      }
+    })
+  }
+
+  function replaceConvertedPresentationAudio(presAudio, replacements) {
+    const map = new Map((replacements || []).map((r) => [String(r.from || ''), String(r.to || '')]).filter(([from, to]) => from && to))
+    const nextPath = map.get(String(presAudio?.sourcePath || ''))
+    if (!nextPath) return presAudio
+    return { ...presAudio, sourcePath: nextPath, file: makeAppMediaUrl(nextPath) }
+  }
+
   async function onSave() {
     // Warn about media that cannot be preserved: blob URLs (temp) and large audio/video with no native path
     const lostMedia = []
@@ -5533,7 +7896,7 @@ function App() {
       }
     }))
     if (lostMedia.length) setStatus(`⚠ ${lostMedia.length} media file(s) will not be preserved: ${lostMedia.slice(0, 2).join(', ')}`)
-    const mmeText = genMME(pages, stage, { presentationAudio, projectVars })
+    const mmeText = genMME(pages, stage, { presentationAudio, projectVars, pronunciationRules: projectPronunciationRules })
     startGlobalOperation({ title: 'Saving Project', message: 'Preparing project file...', progress: null })
     if (desktopApi?.saveMme) {
       try {
@@ -5541,18 +7904,31 @@ function App() {
         const result = await desktopApi.saveMme({
           defaultName: filename.endsWith('.mme') ? filename : 'script.mme',
           text: mmeText,
+          projectAssetPaths: [...new Set([
+            ...collectConvertedProjectAssetPaths(pages, presentationAudio),
+            ...collectGeneratedNarrationAssetPaths(pages),
+          ])],
         })
         if (!result?.canceled) {
           const savedName = result.fileName || filename
+          const savedPages = replaceConvertedProjectAssetPaths(pages, result.assetCopies || [])
+          const savedPresentationAudio = replaceConvertedPresentationAudio(presentationAudio, result.assetCopies || [])
+          const savedMmeText = result.assetCopies?.length
+            ? genMME(savedPages, stage, { presentationAudio: savedPresentationAudio, projectVars, pronunciationRules: projectPronunciationRules })
+            : mmeText
+          if (result.assetCopies?.length) {
+            setPages(savedPages)
+            setPresentationAudio(savedPresentationAudio)
+          }
           setFilename(savedName)
-          setStatus(`Saved: ${savedName}`)
+          setStatus(result.assetCopies?.length ? `Saved: ${savedName} — copied ${result.assetCopies.length} converted media file(s)` : `Saved: ${savedName}`)
           updateGlobalOperation({ message: 'Updating recovery checkpoint...' })
           try {
-            localStorage.setItem('mme_lastSave', mmeText)
+            localStorage.setItem('mme_lastSave', savedMmeText)
             localStorage.setItem('mme_lastSaveName', savedName)
             // Keep lastOpened in sync with the latest explicit save so restarts always
             // load this version regardless of which file was last opened via Open dialog.
-            localStorage.setItem('mme_lastOpened', mmeText)
+            localStorage.setItem('mme_lastOpened', savedMmeText)
             localStorage.setItem('mme_lastOpenedName', savedName)
           } catch { /* quota exceeded — skip */ }
           return true
@@ -5764,13 +8140,22 @@ function App() {
           assets[assetKey] = pg.bgMediaSrc
           pgOut.bgMediaSrc = assetKey
         }
-        // Extract narration audio (use correct extension from filename)
-        if (pg.narration?.file && pg.narration.file.startsWith('data:')) {
-          const narExt = pg.narration.name?.match(/\.(\w+)$/i)?.[1]?.toLowerCase() || 'mp3'
-          const assetKey = `assets/narration_${pi}.${narExt}`
-          assets[assetKey] = pg.narration.file
-          pgOut.narration = { ...pg.narration, file: assetKey }
-        }
+        ;['narration', 'narration2'].forEach((field) => {
+          const track = pg[field]
+          if (track?.file && track.file.startsWith('data:')) {
+            const narExt = track.name?.match(/\.(\w+)$/i)?.[1]?.toLowerCase() || 'mp3'
+            const assetKey = `assets/${field}_${pi}.${narExt}`
+            assets[assetKey] = track.file
+            pgOut[field] = { ...track, file: assetKey }
+          }
+        })
+        pgOut.pageAudioClips = (pg.pageAudioClips || []).map((clip, ci) => {
+          if (!clip?.file?.startsWith('data:')) return clip
+          const narExt = clip.name?.match(/\.(\w+)$/i)?.[1]?.toLowerCase() || 'mp3'
+          const assetKey = `assets/page_audio_${pi}_${ci}.${narExt}`
+          assets[assetKey] = clip.file
+          return { ...clip, file: assetKey }
+        })
         // Extract element media
         pgOut.elements = (pg.elements || []).map((el, ei) => {
           const elOut = { ...el }
@@ -5934,22 +8319,25 @@ body{background:#0a0a0a;display:flex;flex-direction:column;height:100vh;overflow
 </head><body>
 ${encrypted ? `<div id="pw-gate"><h2>📖 ${title}</h2><p style="color:#c0d8f0">Enter password to open</p><input id="pw-inp" type="password" placeholder="Password…" autofocus><button onclick="unlockBook()">Open Book</button><div class="err" id="pw-err"></div></div>` : ''}
 <div id="book-wrap"><div id="stage"></div></div>
-<div id="narration-bar"><button id="nar-btn" title="Play/Pause narration">🔊</button><span id="nar-name">Narration</span></div>
+<div id="narration-bar"><button id="nar-btn" title="Play/Pause page audio">🔊</button><span id="nar-name">Page Audio</span></div>
 <div id="controls">
   <button onclick="navigate(-1)">‹</button>
   <span id="pg-indicator">1/1</span>
   <button onclick="navigate(1)">›</button>
 </div>
 <audio id="narration-audio" preload="auto"></audio>
+<audio id="narration2-audio" preload="auto"></audio>
 <script>
 const IS_ENC=${encrypted};
 const BOOK_B64='${inlineB64}';
 let BOOK=null,cur=0;
 const stage=document.getElementById('stage');
 const narAudio=document.getElementById('narration-audio');
+const narAudio2=document.getElementById('narration2-audio');
 const narBar=document.getElementById('narration-bar');
 const narBtn=document.getElementById('nar-btn');
 const narName=document.getElementById('nar-name');
+let pageAudioClipEls=[];
 
 function scaleStage(){const sw=${sw},sh=${sh};const bw=document.getElementById('book-wrap');const s=Math.min((bw?bw.clientWidth:window.innerWidth)/sw,(bw?bw.clientHeight:window.innerHeight)/sh);document.documentElement.style.setProperty('--sc',s)}
 window.addEventListener('resize',scaleStage);scaleStage();
@@ -6022,11 +8410,50 @@ function handleAction(el,pg){
 function navigate(dir){const next=Math.max(0,Math.min(BOOK.pages.length-1,cur+dir));if(next!==cur)drawPage(next,dir>0?'next':'prev')}
 
 function playNarration(pg){
-  if(!pg.narration||!pg.narration.file){narBar.classList.remove('visible');narAudio.src='';return}
-  narAudio.src=pg.narration.file;narName.textContent=pg.narration.name||'Narration';narBar.classList.add('visible');
-  if(pg.narration.autoPlay!==false){narAudio.play().catch(()=>{})}
+  pageAudioClipEls.forEach(a=>{try{a.pause();a.src=''}catch(e){}});
+  pageAudioClipEls=[];
+  const tracks=[{audio:narAudio,track:pg.narration,label:'PAGE AUDIO 1'},{audio:narAudio2,track:pg.narration2,label:'PAGE AUDIO 2'}];
+  const active=tracks.filter(t=>t.track&&t.track.file);
+  tracks.forEach(({audio,track})=>{
+    audio.pause();audio.src='';
+    if(!track||!track.file)return;
+    audio.src=track.file;
+    audio.preload='auto';
+    try{audio.currentTime=Number(track.offset)||0}catch(e){}
+    if(track.autoPlay!==false){audio.play().catch(()=>{})}
+  });
+  (pg.pageAudioClips||[]).forEach(clip=>{
+    if(!clip||!clip.file)return;
+    const audio=new Audio(clip.file);
+    audio.preload='auto';
+    pageAudioClipEls.push(audio);
+    try{audio.currentTime=Number(clip.trimStart)||0}catch(e){}
+    const play=()=>{if(clip.autoPlay!==false)audio.play().catch(()=>{})};
+    const delay=Math.max(0,Number(clip.offset)||0)*1000;
+    if(delay>0)setTimeout(play,delay);else play();
+  });
+  (pg.elements||[]).forEach(el=>{
+    if(!el||el.visible===false||!el.pageAudioLane||!el.file)return;
+    const kind=el.mediaKind||'';
+    if(kind!=='audio'&&!String(el.file).match(/\\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\\?|#|$)/i))return;
+    const audio=new Audio(el.file);
+    audio.preload='auto';
+    pageAudioClipEls.push(audio);
+    try{audio.currentTime=0}catch(e){}
+    const play=()=>{if(el.autoPlay!==false)audio.play().catch(()=>{})};
+    const delay=Math.max(0,Number(el.pageAudioOffset??el.mediaStartTime)||0)*1000;
+    if(delay>0)setTimeout(play,delay);else play();
+  });
+  if(!active.length&&!pageAudioClipEls.length){narBar.classList.remove('visible');return}
+  narName.textContent=[...active.map(t=>t.track.name||t.label),...pageAudioClipEls.map((_,i)=>'Clip '+(i+1))].join(' + ');
+  narBar.classList.add('visible');
 }
-function toggleNarration(){narAudio.paused?narAudio.play().catch(()=>{}):narAudio.pause();narBtn.textContent=narAudio.paused?'🔊':'⏸'}
+function toggleNarration(){
+  const active=[narAudio,narAudio2,...pageAudioClipEls].filter(a=>a.src);
+  const shouldPlay=active.some(a=>a.paused);
+  active.forEach(a=>{if(shouldPlay)a.play().catch(()=>{});else a.pause()});
+  narBtn.textContent=shouldPlay?'⏸':'🔊';
+}
 narBtn.addEventListener('click',toggleNarration);
 
 document.addEventListener('keydown',e=>{if(e.key==='ArrowRight')navigate(1);if(e.key==='ArrowLeft')navigate(-1)});
@@ -6201,7 +8628,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
     // Apply a resolved media URL to the appropriate target (page bg, audio event, or element).
     const resolveTarget = (url, finalName, inlineCategory, capability, sourcePath, resolve) => {
       if (target === 'bg') {
-        // Store native source path for SCA persistence; bgMediaSrc = the playable URL
+        // Store native source path for MME persistence; bgMediaSrc = the playable URL
         const bgSourcePath = sourcePath && !isTempUrl(sourcePath) ? sourcePath : null
         setPages((prev) => prev.map((pg, i) => i === pageIndexAtInvoke ? {
           ...pg,
@@ -6661,6 +9088,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
       { id: 'play-loop-toggle',       label: <Repeat size={13}/>,              title: 'Toggle loop',              active: presentationLoop },
       { id: 'play-ctrl-toggle',       label: <SlidersHorizontal size={13}/>,   title: 'Show player controls bar', active: presentationShowControls },
       { id: 'play-interactive',       label: <Hand size={13}/>,                title: 'Interactive mode',         active: presentationInteractive },
+      { id: 'play-hide-media-controls-toggle', label: <EyeOff size={13}/>,     title: 'Hide media controls',      active: presentationHideMediaControls },
       { id: 'play-fullscreen-toggle', label: <Maximize size={13}/>,            title: 'Launch fullscreen',        active: presentationFullscreen },
       { id: 'play-dev-mode',          label: <Code2 size={13}/>,               title: 'Developer mode overlay',   active: presentationDevMode },
     ],
@@ -6721,7 +9149,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
     if (commandId === 'file-import-pages') {
       const input = document.createElement('input')
       input.type = 'file'
-      input.accept = '.mme,.sca'
+      input.accept = '.mme'
       input.onchange = async (e) => {
         const file = /** @type {HTMLInputElement} */(e.target).files?.[0]
         if (!file) return
@@ -6877,7 +9305,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
         setStatus('Zoom already at maximum')
         return
       }
-      const next = Math.max(0.1, Math.min(3, Math.round((zoom + 0.1) * 10) / 10))
+      const next = Math.max(0.1, Math.min(3, Math.round((zoom + 0.05) * 20) / 20))
       setZoom(next)
       setStatus(`Zoom ${Math.round(next * 100)}%`)
       const zSel = selId && pages[cur]?.elements.find(e => e.id === selId)
@@ -6890,7 +9318,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
         setStatus('Zoom already at minimum')
         return
       }
-      const next = Math.max(0.1, Math.min(3, Math.round((zoom - 0.1) * 10) / 10))
+      const next = Math.max(0.1, Math.min(3, Math.round((zoom - 0.05) * 20) / 20))
       setZoom(next)
       setStatus(`Zoom ${Math.round(next * 100)}%`)
       const zSel = selId && pages[cur]?.elements.find(e => e.id === selId)
@@ -7040,7 +9468,20 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
       return
     }
     if (commandId === 'play-interactive') {
-      setPresentationInteractive((v) => { setStatus(`Interactive mode: ${!v ? 'ON' : 'OFF'}`); return !v })
+      setPresentationInteractive((v) => {
+        const next = !v
+        if (next) setPresentationShowControls(false)
+        setStatus(`Interactive mode: ${next ? 'ON' : 'OFF'}`)
+        return next
+      })
+      return
+    }
+    if (commandId === 'play-hide-media-controls-toggle') {
+      setPresentationHideMediaControls((v) => {
+        const next = !v
+        setStatus(`Media controls: ${next ? 'hidden' : 'visible'}`)
+        return next
+      })
       return
     }
     if (commandId === 'play-fullscreen-toggle') {
@@ -7181,7 +9622,8 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
           <button onClick={() => executeCommand('file-open')} title="Open .mme file  [Ctrl+O]">Open</button>
           <button onClick={() => executeCommand('file-save')} title="Save  [Ctrl+S]">Save</button>
           <span className="sep" />
-          <button onClick={() => executeCommand('file-import-pages')} title="Import pages from another .mme file"><Import size={13}/> Import Pages…</button>
+          <button onClick={() => executeCommand('file-import-pages')} title="Import script from another .mme file"><Import size={13}/> Import Script…</button>
+          <button onClick={() => setImportTemplateDlg(true)} title="Import pages and Fuse scripts directly from a template"><BookOpen size={13}/> Import Template…</button>
           <button onClick={() => executeCommand('file-import-pdf')} title="Import a PDF as page backgrounds"><FileText size={13}/> Import PDF</button>
           <span className="sep" />
           <button onClick={() => executeCommand('file-publish')} title="Publish / Export — all output formats"><Upload size={13}/> Publish…</button>
@@ -7235,7 +9677,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
           <button onClick={() => executeCommand('file-print')} title="Print current page">Print…</button>
           <button onClick={() => executeCommand('file-export-html')} title="Quick-export as standalone HTML presentation  [Ctrl+E]">HTML…</button>
           <button onClick={() => executeCommand('file-export-storybook')} title="Export interactive storybook package">Storybook…</button>
-          <button onClick={() => executeCommand('file-export-script')} title="Export .sca script file">Script…</button>
+          <button onClick={() => executeCommand('file-export-script')} title="Export .mme project script">Script…</button>
           <button onClick={() => executeCommand('file-export-screen-png')} title="Export full-screen screenshot as PNG">Screen PNG</button>
           <button onClick={() => executeCommand('file-export-page-png')} title="Export current page as PNG">Page PNG</button>
           <button onClick={() => setShowSettingsDlg(true)} title="FluxAura Studio settings"><Settings size={13}/> Settings</button>
@@ -7300,7 +9742,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
           >{showScriptFlow ? <><X size={13}/> Script Flow</> : <><GitBranch size={13}/> Script Flow</>}</button>
           <button
             className={`toolbar-btn-vars${showVarEditor ? ' on' : ''}`}
-            title="Variable &amp; Script Editor"
+            title="FluxAura Fuse - Visual Script Programming"
             onClick={() => executeCommand('view-variables')}
           ><Zap size={13}/> Variables</button>
           <span className="sep" />
@@ -7388,8 +9830,8 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
               className={`${cmd.active ? 'on' : ''}${cmd.disabled ? ' disabled' : ''}`}
               disabled={cmd.disabled} onClick={() => executeCommand(cmd.id)}>{cmd.label}</button>
           ))}
-          {/* Alignment / Distribute / Group — shown to the right of Toggle Loop when 2+ selected */}
-          {selIds.length >= 2 && (
+          {/* Alignment / Distribute / Group — alignment applies to any selected element; spacing/grouping require multi-select. */}
+          {(selIds.length > 0 || !!selId) && (
             <>
               <span className="sep" />
               {toolbarSections[2].map((cmd) => (
@@ -7420,6 +9862,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
             {pages.map((pg, i) => (
               <button
                 key={pg.id}
+                data-fluxaura-page-index={i}
                 className={`pageitem pageitem-thumb ${i === cur ? 'sel' : ''} ${selectedPageIds.includes(i) ? 'multi-sel' : ''} ${pageDragOverIdx === i ? 'page-drag-over' : ''}`}
                 onClick={(e) => handlePageSelect(i, e)}
                 draggable
@@ -7731,7 +10174,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
             <div
               ref={stageRef}
               className={`stage tool-${tool}`}
-              style={{ width: stageWidth, height: stageHeight, zoom: zoom, '--smm-stage-h': `${stageHeight}px` }}
+              style={/** @type {import('react').CSSProperties} */ ({ width: stageWidth, height: stageHeight, zoom: zoom, '--smm-stage-h': `${stageHeight}px` })}
               onMouseDown={onStageMouseDown}
               onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }}
               onDrop={(e) => {
@@ -7922,6 +10365,21 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                               style={{ width: '100%', height: '100%' }}
                               previewOnly
                             />
+                          ) : (el.chromaColor || el.chromaMaskShape || el.chromaSelections?.length) ? (
+                            <ImageChromaCanvas
+                              src={el.file}
+                              chromaColor={el.chromaColor || null}
+                              tolerance={el.chromaTolerance != null ? el.chromaTolerance : 30}
+                              softness={el.chromaSoftness != null ? el.chromaSoftness : 8}
+                              maskShape={el.chromaMaskShape || null}
+                              maskShapes={el.chromaSelections || null}
+                              onError={() => setStatus(`Media decode failed: ${el.mediaName || el.mediaExt || 'image'}`)}
+                              style={{
+                                objectFit: el.fit,
+                                opacity: (el.opacity || 100) / 100,
+                                clipPath: el.snapshotShape ? (hotspotShapeToClipPath(el.snapshotShape, el.snapshotPoints || []) || undefined) : undefined,
+                              }}
+                            />
                           ) : (
                             <img
                               src={el.file}
@@ -7936,18 +10394,32 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                           )
                         )}
                         {(el.file && (el.mediaKind || detectMediaKind(el.file)) === 'video') && (
-                          <video
-                            key={el.file}
-                            src={el.file}
-                            autoPlay
-                            muted
-                            playsInline
-                            loop
-                            controls={el.showMediaControls !== false}
-                            onCanPlay={e => { e.currentTarget.style.opacity = String((el.opacity || 100) / 100) }}
-                            onError={() => setStatus(`Media decode failed: ${el.mediaName || el.mediaExt || 'video'}`)}
-                            style={{ width: '100%', height: '100%', objectFit: el.fit || 'contain', opacity: 0, transition: 'opacity 0.15s' }}
-                          />
+                          (el.chromaColor || el.chromaMaskShape) ? (
+                            <VideoChromaCanvas
+                              key={el.file}
+                              src={el.file}
+                              chromaColor={el.chromaColor || null}
+                              tolerance={el.chromaTolerance != null ? el.chromaTolerance : 30}
+                              softness={el.chromaSoftness != null ? el.chromaSoftness : 8}
+                              maskShape={el.chromaMaskShape || null}
+                              loop={el.loop !== false}
+                              muted
+                              style={{ objectFit: el.fit || 'contain', opacity: (el.opacity || 100) / 100 }}
+                            />
+                          ) : (
+                            <video
+                              key={el.file}
+                              src={el.file}
+                              autoPlay
+                              muted
+                              playsInline
+                              loop
+                              controls={el.showMediaControls !== false}
+                              onCanPlay={e => { e.currentTarget.style.opacity = String((el.opacity || 100) / 100) }}
+                              onError={() => setStatus(`Media decode failed: ${el.mediaName || el.mediaExt || 'video'}`)}
+                              style={{ width: '100%', height: '100%', objectFit: el.fit || 'contain', opacity: 0, transition: 'opacity 0.15s' }}
+                            />
+                          )
                         )}
                         {(el.file && (el.mediaKind || detectMediaKind(el.file)) === 'audio') && (
                           <div className="clip-audio">
@@ -8294,6 +10766,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                       verticalAlign: itel.verticalAlign || 'middle',
                     }}
                     value={itel.content || ''}
+                    spellCheck={true}
                     onChange={(e) => updateElement({ content: e.target.value })}
                     onBlur={() => setInlineEditId(null)}
                     onKeyDown={(ev) => {
@@ -8376,6 +10849,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                         chromaTolerance: _meta.tolerance       != null ? _meta.tolerance  : 30,
                         chromaSoftness:  _meta.softness        != null ? _meta.softness   : 8,
                         chromaMaskShape: _meta.liveMaskShape   || null,
+                        chromaSelections: _meta.chromaSelections || null,
                       }),
                     })))
                     setChromaKeyModalEl(null)
@@ -8383,19 +10857,22 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                     return
                   }
 
-                  // Image sources — bake PNG
-                  if (!resultDataUrl) { setChromaKeyModalEl(null); return }
-                  const blobUrl = internDataUrl(resultDataUrl)
+                  // Image sources — store live, non-destructive settings just like video.
                   setPages(prev => prev.map(pg => ({
                     ...pg,
                     elements: pg.elements.map(e => e.id !== elId ? e : {
                       ...e,
-                      file: blobUrl,
+                      file: origFile || e.file,
                       chromaOrigFile: origFile,
+                      chromaColor:     _meta?.chromaColor     || null,
+                      chromaTolerance: _meta?.tolerance       != null ? _meta.tolerance : 30,
+                      chromaSoftness:  _meta?.softness        != null ? _meta.softness  : 8,
+                      chromaMaskShape: _meta?.liveMaskShape   || null,
+                      chromaSelections: _meta?.chromaSelections || null,
                     }),
                   })))
                   setChromaKeyModalEl(null)
-                  setStatus('Background removal applied')
+                  setStatus('Live background removal applied')
                 }}
                 onCancel={() => setChromaKeyModalEl(null)}
               />
@@ -8526,7 +11003,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
             <ScriptFlowEditor
               pages={pages}
               onClose={() => setShowScriptFlow(false)}
-              onNavigatePage={(i) => { setCur(i); setShowScriptFlow(false) }}
+              onNavigatePage={(i) => { goToPage(i); setShowScriptFlow(false) }}
             />
           )}
         </section>
@@ -8568,6 +11045,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
             {pages.map((pg, i) => (
               <div
                 key={pg.id}
+                data-fluxaura-inspector-page-index={i}
                 className={`insp-pagerow ${i === cur ? 'sel' : ''} ${selectedPageIds.includes(i) ? 'multi-sel' : ''} ${pageDragOverIdx === i ? 'page-drag-over' : ''}`}
                 draggable
                 onDragStart={(e) => handlePageDragStart(e, i)}
@@ -8775,7 +11253,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                                     onClick={() => {
                                       import('./utils/ttsUtils.js').then(({ speak, isTTSAvailable }) => {
                                         if (!isTTSAvailable()) { alert('Web Speech API not available in this environment'); return }
-                                        speak(selectedEl?.content || '', undefined, 1, 1, 0.9)
+                                        speak(applyPronunciationRules(selectedEl?.content || '', combinePronunciationRules(projectPronunciationRules, selectedEl?.pronunciationRules)), undefined, 1, 1, 0.9)
                                       })
                                     }}
                                   >🔊 Speak</button>
@@ -8790,22 +11268,77 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                                     onClick={() => setShowPiperTTS((v) => !v)}
                                   >🤖 {showPiperTTS ? 'Hide' : 'Neural'}</button>
                                 </div>
+                                <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 5 }}>
+                                  Voice: {selectedTextEls.length > 1
+                                    ? `${selectedTextEls.length} selected${new Set(selectedTextEls.map((el) => el.ttsVoiceId || 'default')).size > 1 ? ' · mixed voices' : ''}`
+                                    : (selectedEl.ttsVoiceLabel || 'Default Piper voice')}
+                                </div>
+                                <label style={{ display: 'block', fontSize: 10, color: 'var(--t3)', marginTop: 7 }}>
+                                  Project pronunciation dictionary
+                                  <textarea
+                                    value={projectPronunciationRules}
+                                    onChange={(e) => setProjectPronunciationRules(e.target.value)}
+                                    spellCheck={true}
+                                    placeholder={'FluxAura => flux aura\nAniStudio => annie studio'}
+                                    rows={3}
+                                    style={{ width: '100%', marginTop: 3, fontSize: 11, resize: 'vertical' }}
+                                  />
+                                  <div style={{ fontSize: 9, color: 'var(--t4)', marginTop: 3 }}>
+                                    Use simple spoken replacements first; IPA/phonetic spellings can be typed as the replacement when a voice needs extra help.
+                                  </div>
+                                </label>
+                                <label style={{ display: 'block', fontSize: 10, color: 'var(--t3)', marginTop: 7 }}>
+                                  Pronunciation dictionary (spoken only)
+                                  <textarea
+                                    value={selectedEl.pronunciationRules || ''}
+                                    onChange={(e) => updateElement({ pronunciationRules: e.target.value })}
+                                    spellCheck={true}
+                                    placeholder={'river wound => river wownd\nbig wound => big woond'}
+                                    rows={3}
+                                    style={{ width: '100%', marginTop: 3, fontSize: 11, resize: 'vertical' }}
+                                  />
+                                  <div style={{ fontSize: 9, color: 'var(--t4)', marginTop: 3 }}>
+                                    Per-text rules are applied after project rules, so this box can override one line of dialogue.
+                                  </div>
+                                </label>
                                 {showPiperTTS && (
                                   <div style={{ marginTop: 6 }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--t3)', marginBottom: 6 }}>
+                                      Add generated clip to
+                                      <select
+                                        value={selectedTextTtsLane}
+                                        onChange={(e) => setSelectedTextTtsLane(Number(e.target.value))}
+                                        style={{ fontSize: 10, flex: 1 }}
+                                      >
+                                        <option value={1}>PAGE AUDIO 1</option>
+                                        <option value={2}>PAGE AUDIO 2</option>
+                                      </select>
+                                    </label>
                                     <PiperTTSPanel
-                                      initialText={selectedEl?.content || ''}
+                                      initialText={applyPronunciationRules(selectedEl?.content || '', combinePronunciationRules(projectPronunciationRules, selectedEl?.pronunciationRules))}
+                                      batchTexts={selectedTextBatch}
+                                      initialVoiceId={selectedEl?.ttsVoiceId || ''}
+                                      initialRate={selectedEl?.ttsRate || 1}
+                                      outputNamePrefix={`PAGE${String(cur + 1).padStart(2, '0')}_AUDIO${selectedTextTtsLane}`}
+                                      onVoiceChange={(voiceId, voice) => updateSelectedTextVoice({ ttsVoiceId: voiceId, ttsVoiceLabel: voice?.label || voiceId })}
+                                      onRateChange={(rate) => updateSelectedTextVoice({ ttsRate: rate })}
                                       compact={false}
                                       onClose={() => setShowPiperTTS(false)}
-                                      onSynthesized={async ({ path: wavPath, name: wavName }) => {
-                                        const port = window.smmDesktop?.mediaServerPort || 0
-                                        if (port) {
-                                          const url = `http://127.0.0.1:${port}/?p=${encodeURIComponent(wavPath)}`
-                                          setPages((prev) => prev.map((pg, i) =>
-                                            i === cur
-                                              ? { ...pg, narration: { file: url, name: wavName, sourcePath: wavPath, autoPlay: true } }
-                                              : pg
-                                          ))
-                                          setStatus(`Narration set: ${wavName}`)
+                                      onSynthesizedBatch={(payloads) => {
+                                        const clips = (payloads || [])
+                                          .map((payload) => piperPayloadToPageAudioClip(payload, selectedEl))
+                                          .filter(Boolean)
+                                        if (!clips.length) return
+                                        appendPageAudioClipsSequential(selectedTextTtsLane, clips)
+                                        setStatus(`Added ${clips.length} narration clips to Page Audio ${selectedTextTtsLane}`)
+                                      }}
+                                      onSynthesized={async (payload) => {
+                                        const clip = piperPayloadToPageAudioClip(payload, selectedEl)
+                                        if (clip) {
+                                          appendPageAudioClip(selectedTextTtsLane, {
+                                            ...clip,
+                                          })
+                                          setStatus(`Added selected text to Page Audio ${selectedTextTtsLane}: ${clip.name}`)
                                         }
                                       }}
                                     />
@@ -9080,7 +11613,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                                 </div>
                                 {selectedEl.chromaOrigFile && (
                                   <p className="muted" style={{ fontSize: 10, color: 'var(--mme-teal)', margin: '2px 0' }}>
-                                    ✔ Background removal active — original image preserved
+                                    ✔ Background removal active — original media preserved
                                   </p>
                                 )}
                                 <div className="behavior-title" style={{ marginTop: 8 }}>🖼 Frame / Border</div>
@@ -10506,6 +13039,8 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                           setPages((prev) => prev.map((pg) => ({ ...pg, timing: { ...pg.timing,
                             mode: /** @type {any} */ (tm).mode,
                             duration: /** @type {any} */ (tm).duration,
+                            durationMs: /** @type {any} */ (tm).durationMs,
+                            ms: /** @type {any} */ (tm).ms,
                             waitInputTrigger: /** @type {any} */ (tm).waitInputTrigger,
                             waitInputKey: /** @type {any} */ (tm).waitInputKey,
                             waitInputGoto: /** @type {any} */ (tm).waitInputGoto } })))
@@ -10520,7 +13055,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                           const tm = /** @type {any} */ (currentPage.timing || {})
                           setPages((prev) => prev.map((pg, i) =>
                             selectedPageIds.includes(i)
-                              ? { ...pg, timing: { ...pg.timing, mode: tm.mode, duration: tm.duration,
+                              ? { ...pg, timing: { ...pg.timing, mode: tm.mode, duration: tm.duration, durationMs: tm.durationMs, ms: tm.ms,
                                   waitInputTrigger: tm.waitInputTrigger, waitInputKey: tm.waitInputKey, waitInputGoto: tm.waitInputGoto } }
                               : pg
                           ))
@@ -10544,29 +13079,50 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                         <option value="none">— None (no advance)</option>
                         <option value="loop">🔁 Loop (timed, wrap to first)</option>
                         <option value="wait-input-goto">⌨ Wait for input → Go to…</option>
+                        <option value="media">🎬 Wait for media to finish</option>
                         <option value="auto">▶ Auto (timed advance)</option>
                       </select>
                     </label>
-                    {((currentPage.timing || {}).mode === 'pause' || (currentPage.timing || {}).mode === 'loop' || (currentPage.timing || {}).mode === 'auto') && (
-                      <label>
-                        Duration (s)
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.5"
-                          value={(currentPage.timing || {}).duration}
-                          onChange={(e) =>
-                            setPages((prev) =>
-                              prev.map((pg, i) =>
-                                i === cur
-                                  ? { ...pg, timing: { ...pg.timing, duration: Number(e.target.value) || 0 } }
-                                  : pg,
-                              ),
-                            )
-                          }
-                        />
-                      </label>
-                    )}
+                    {((currentPage.timing || {}).mode === 'pause' || (currentPage.timing || {}).mode === 'loop' || (currentPage.timing || {}).mode === 'auto' || (currentPage.timing || {}).mode === 'media') && (() => {
+                      const totalMs = pageTimingDurationMs(currentPage.timing || {})
+                      const parts = timingPartsFromMs(totalMs)
+                      const setPart = (field, value) => {
+                        const nextParts = { ...parts, [field]: value }
+                        const nextMs = timingMsFromParts(nextParts)
+                        setPages((prev) =>
+                          prev.map((pg, i) =>
+                            i === cur
+                              ? { ...pg, timing: { ...pg.timing, durationMs: nextMs, duration: Math.round((nextMs / 1000) * 1000) / 1000, ms: 0 } }
+                              : pg,
+                          ),
+                        )
+                      }
+                      return (
+                        <div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>
+                            {(currentPage.timing || {}).mode === 'media' ? 'Fallback duration if no playable media ends' : 'Duration'}
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 4 }}>
+                            <label title="Hours">
+                              H
+                              <input type="number" min="0" step="1" value={parts.hours} onChange={(e) => setPart('hours', Number(e.target.value) || 0)} />
+                            </label>
+                            <label title="Minutes">
+                              M
+                              <input type="number" min="0" max="59" step="1" value={parts.minutes} onChange={(e) => setPart('minutes', Number(e.target.value) || 0)} />
+                            </label>
+                            <label title="Seconds">
+                              S
+                              <input type="number" min="0" max="59" step="1" value={parts.seconds} onChange={(e) => setPart('seconds', Number(e.target.value) || 0)} />
+                            </label>
+                            <label title="Milliseconds">
+                              MS
+                              <input type="number" min="0" max="999" step="1" value={parts.milliseconds} onChange={(e) => setPart('milliseconds', Number(e.target.value) || 0)} />
+                            </label>
+                          </div>
+                        </div>
+                      )
+                    })()}
                     <label title="Override this page's duration in MP4 export (0 = use audio length or default). Does not affect presentation playback.">
                       MP4 Export dur. (s)
                       <input
@@ -10839,24 +13395,20 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                 </button>
                 {sOpen('page-audio', false) && (
                   <div className="acc-body">
-                    <div className="behavior-title narration-title" style={{ marginBottom: 4 }}>🎙 Narration</div>
+                    <div className="behavior-title narration-title" style={{ marginBottom: 4 }}>🎙 PAGE AUDIO 1</div>
                     <div className="narration-inspector">
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         <button
                           className="narration-load-btn"
-                          onClick={async () => {
-                            const r = await pickFile('audio')
-                            if (!r) return
-                            setPages((prev) =>
-                              prev.map((pg, i) =>
-                                i === cur
-                                  ? { ...pg, narration: { ...(pg.narration || {}), file: r.url, name: r.name } }
-                                  : pg,
-                              ),
-                            )
-                            setStatus(`Narration: ${r.name}`)
+                          onClick={() => {
+                            if (selectedEl?.type !== 'text') {
+                              setStatus('Select a text block to create Piper narration.')
+                              return
+                            }
+                            setSelectedTextTtsLane(1)
+                            setPageAudioTtsLane((lane) => lane === 1 ? null : 1)
                           }}
-                        >🎙 Load Narration</button>
+                        >🎙 Narrate Selected Text</button>
                         {currentPage.narration?.file && (
                           <button
                             onClick={() =>
@@ -10870,7 +13422,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                         )}
                       </div>
                       {currentPage.narration?.name && (
-                        <div className="pg-media-name narration-name">🎙 {currentPage.narration.name}</div>
+                        <div className="pg-media-name narration-name">🎙 PAGE AUDIO 1: {currentPage.narration.name}</div>
                       )}
                       {currentPage.narration?.file && (
                         <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }}>
@@ -10890,30 +13442,195 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                       )}
                       {!currentPage.narration?.file && (
                         <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 3 }}>
-                          Load an audio file to narrate this page. Plays when reader opens the spread.
+                          Select a text block, then open Piper narration here for PAGE AUDIO 1.
                         </div>
                       )}
-                      {/* Piper TTS — generate narration from page text */}
+                      {pageAudioTtsLane === 1 && selectedEl?.type === 'text' && (
+                        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border, #333)' }}>
+                          <PiperTTSPanel
+                            initialText={applyPronunciationRules(selectedEl?.content || '', combinePronunciationRules(projectPronunciationRules, selectedEl?.pronunciationRules))}
+                            batchTexts={selectedTextBatch}
+                            initialVoiceId={selectedEl?.ttsVoiceId || ''}
+                            initialRate={selectedEl?.ttsRate || 1}
+                            outputNamePrefix={`PAGE${String(cur + 1).padStart(2, '0')}_AUDIO1`}
+                            onVoiceChange={(voiceId, voice) => updateSelectedTextVoice({ ttsVoiceId: voiceId, ttsVoiceLabel: voice?.label || voiceId })}
+                            onRateChange={(rate) => updateSelectedTextVoice({ ttsRate: rate })}
+                            compact={false}
+                            onClose={() => setPageAudioTtsLane(null)}
+                            onSynthesizedBatch={(payloads) => {
+                              const clips = (payloads || [])
+                                .map((payload) => piperPayloadToPageAudioClip(payload, selectedEl))
+                                .filter(Boolean)
+                              if (!clips.length) return
+                              appendPageAudioClipsSequential(1, clips)
+                              setStatus(`Added ${clips.length} narration clips to Page Audio 1`)
+                            }}
+                            onSynthesized={(payload) => {
+                              const clip = piperPayloadToPageAudioClip(payload, selectedEl)
+                              if (!clip) return
+                              appendPageAudioClip(1, {
+                                ...clip,
+                              })
+                              setStatus(`Added selected text to Page Audio 1: ${clip.name}`)
+                            }}
+                          />
+                        </div>
+                      )}
                       <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border, #333)' }}>
                         <div style={{ fontSize: 10, color: 'var(--t3)', marginBottom: 4 }}>
-                          Or generate narration from page text using offline neural TTS:
+                          PAGE AUDIO 1 clips from selected text:
                         </div>
-                        <PiperTTSPanel
-                          compact
-                          initialText={currentPage.elements?.filter((e) => e.type === 'text').map((e) => e.content || '').join(' ') || ''}
-                          onClose={() => {}}
-                          onSynthesized={({ path: wavPath, name: wavName }) => {
-                            const port = window.smmDesktop?.mediaServerPort || 0
-                            if (!port) return
-                            const url = `http://127.0.0.1:${port}/?p=${encodeURIComponent(wavPath)}`
-                            setPages((prev) => prev.map((pg, i) =>
-                              i === cur
-                                ? { ...pg, narration: { file: url, name: wavName, sourcePath: wavPath, autoPlay: true } }
-                                : pg
-                            ))
-                            setStatus(`Narration set: ${wavName}`)
+                        {pageAudioElementsByLane[1].map((el) => (
+                          <div key={el.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--t2)', marginTop: 3 }}>
+                            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{el.elLabel || el.mediaName || 'Page Audio 1 clip'}</span>
+                            <button
+                              title="Transcribe this clip to word timings"
+                              disabled={pageAudioWordSyncId === el.id}
+                              onClick={() => { syncPageAudioClipWords(1, el, 'element') }}
+                            >{pageAudioWordSyncId === el.id ? '…' : 'Sync'}</button>
+                            <button
+                              title="Select this audio element"
+                              onClick={() => { setSelId(el.id); setSelIds([el.id]); setInspectorTab('props') }}
+                            >Sel</button>
+                          </div>
+                        ))}
+                        {(currentPage.pageAudioClips || []).filter((clip) => Number(clip.lane || 1) === 1).map((clip) => (
+                          <div key={clip.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--t2)', marginTop: 3 }}>
+                            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{clip.name || 'Page Audio 1 clip'}</span>
+                            <button
+                              title="Transcribe this clip to word timings"
+                              disabled={pageAudioWordSyncId === clip.id}
+                              onClick={() => { syncPageAudioClipWords(1, clip, 'clip') }}
+                            >{pageAudioWordSyncId === clip.id ? '…' : 'Sync'}</button>
+                            <button
+                              onClick={() => setPages((prev) => prev.map((pg, i) =>
+                                i === cur ? { ...pg, pageAudioClips: (pg.pageAudioClips || []).filter((c) => c.id !== clip.id) } : pg
+                              ))}
+                            >✕</button>
+                          </div>
+                        ))}
+                        {!pageAudioElementsByLane[1].length && !(currentPage.pageAudioClips || []).some((clip) => Number(clip.lane || 1) === 1) && (
+                          <div style={{ fontSize: 10, color: 'var(--t4)', marginTop: 3 }}>No PAGE AUDIO 1 clips yet.</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="narration-inspector" style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border, #333)' }}>
+                      <div className="behavior-title narration-title" style={{ marginBottom: 4 }}>🎙 PAGE AUDIO 2</div>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <button
+                          className="narration-load-btn"
+                          onClick={() => {
+                            if (selectedEl?.type !== 'text') {
+                              setStatus('Select a text block to create Piper narration.')
+                              return
+                            }
+                            setSelectedTextTtsLane(2)
+                            setPageAudioTtsLane((lane) => lane === 2 ? null : 2)
                           }}
-                        />
+                        >🎙 Narrate Selected Text</button>
+                        {currentPage.narration2?.file && (
+                          <button
+                            onClick={() =>
+                              setPages((prev) =>
+                                prev.map((pg, i) =>
+                                  i === cur ? { ...pg, narration2: { ...(pg.narration2 || {}), file: '', name: '', sourcePath: '' } } : pg,
+                                ),
+                              )
+                            }
+                          >✕ Clear</button>
+                        )}
+                      </div>
+                      {currentPage.narration2?.name && (
+                        <div className="pg-media-name narration-name">🎙 PAGE AUDIO 2: {currentPage.narration2.name}</div>
+                      )}
+                      {currentPage.narration2?.file && (
+                        <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                          <input
+                            type="checkbox"
+                            checked={currentPage.narration2?.autoPlay !== false}
+                            onChange={(e) =>
+                              setPages((prev) =>
+                                prev.map((pg, i) =>
+                                  i === cur ? { ...pg, narration2: { ...(pg.narration2 || {}), autoPlay: e.target.checked } } : pg,
+                                ),
+                              )
+                            }
+                          />
+                          Auto-play on page enter
+                        </label>
+                      )}
+                      {!currentPage.narration2?.file && (
+                        <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 3 }}>
+                          Select a text block, then open Piper narration here for PAGE AUDIO 2.
+                        </div>
+                      )}
+                      {pageAudioTtsLane === 2 && selectedEl?.type === 'text' && (
+                        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border, #333)' }}>
+                          <PiperTTSPanel
+                            initialText={applyPronunciationRules(selectedEl?.content || '', combinePronunciationRules(projectPronunciationRules, selectedEl?.pronunciationRules))}
+                            batchTexts={selectedTextBatch}
+                            initialVoiceId={selectedEl?.ttsVoiceId || ''}
+                            initialRate={selectedEl?.ttsRate || 1}
+                            outputNamePrefix={`PAGE${String(cur + 1).padStart(2, '0')}_AUDIO2`}
+                            onVoiceChange={(voiceId, voice) => updateSelectedTextVoice({ ttsVoiceId: voiceId, ttsVoiceLabel: voice?.label || voiceId })}
+                            onRateChange={(rate) => updateSelectedTextVoice({ ttsRate: rate })}
+                            compact={false}
+                            onClose={() => setPageAudioTtsLane(null)}
+                            onSynthesizedBatch={(payloads) => {
+                              const clips = (payloads || [])
+                                .map((payload) => piperPayloadToPageAudioClip(payload, selectedEl))
+                                .filter(Boolean)
+                              if (!clips.length) return
+                              appendPageAudioClipsSequential(2, clips)
+                              setStatus(`Added ${clips.length} narration clips to Page Audio 2`)
+                            }}
+                            onSynthesized={(payload) => {
+                              const clip = piperPayloadToPageAudioClip(payload, selectedEl)
+                              if (!clip) return
+                              appendPageAudioClip(2, {
+                                ...clip,
+                              })
+                              setStatus(`Added selected text to Page Audio 2: ${clip.name}`)
+                            }}
+                          />
+                        </div>
+                      )}
+                      <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border, #333)' }}>
+                        <div style={{ fontSize: 10, color: 'var(--t3)', marginBottom: 4 }}>
+                          PAGE AUDIO 2 clips from selected text:
+                        </div>
+                        {pageAudioElementsByLane[2].map((el) => (
+                          <div key={el.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--t2)', marginTop: 3 }}>
+                            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{el.elLabel || el.mediaName || 'Page Audio 2 clip'}</span>
+                            <button
+                              title="Transcribe this clip to word timings"
+                              disabled={pageAudioWordSyncId === el.id}
+                              onClick={() => { syncPageAudioClipWords(2, el, 'element') }}
+                            >{pageAudioWordSyncId === el.id ? '…' : 'Sync'}</button>
+                            <button
+                              title="Select this audio element"
+                              onClick={() => { setSelId(el.id); setSelIds([el.id]); setInspectorTab('props') }}
+                            >Sel</button>
+                          </div>
+                        ))}
+                        {(currentPage.pageAudioClips || []).filter((clip) => Number(clip.lane || 1) === 2).map((clip) => (
+                          <div key={clip.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--t2)', marginTop: 3 }}>
+                            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{clip.name || 'Page Audio 2 clip'}</span>
+                            <button
+                              title="Transcribe this clip to word timings"
+                              disabled={pageAudioWordSyncId === clip.id}
+                              onClick={() => { syncPageAudioClipWords(2, clip, 'clip') }}
+                            >{pageAudioWordSyncId === clip.id ? '…' : 'Sync'}</button>
+                            <button
+                              onClick={() => setPages((prev) => prev.map((pg, i) =>
+                                i === cur ? { ...pg, pageAudioClips: (pg.pageAudioClips || []).filter((c) => c.id !== clip.id) } : pg
+                              ))}
+                            >✕</button>
+                          </div>
+                        ))}
+                        {!pageAudioElementsByLane[2].length && !(currentPage.pageAudioClips || []).some((clip) => Number(clip.lane || 1) === 2) && (
+                          <div style={{ fontSize: 10, color: 'var(--t4)', marginTop: 3 }}>No PAGE AUDIO 2 clips yet.</div>
+                        )}
                       </div>
                     </div>
                     {/* ── Whisper STT — transcribe narration/sound to text ── */}
@@ -10929,8 +13646,8 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                       </div>
                       {showWhisper && (
                         <WhisperPanel
-                          audioUrl={currentPage.narration?.file || currentPage.sound?.file || ''}
-                          audioName={currentPage.narration?.name || currentPage.sound?.name || ''}
+                          audioUrl={currentPage.narration?.file || currentPage.narration2?.file || currentPage.sound?.file || ''}
+                          audioName={currentPage.narration?.name || currentPage.narration2?.name || currentPage.sound?.name || ''}
                           onInsertText={(text) => {
                             // Add a new text element to the page with the transcript
                             const newEl = makeElem('text', 40, currentPage.elements?.length ? 200 : 100, (currentPage.width || 800), 80)
@@ -11083,7 +13800,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                           setPages((prev) =>
                             prev.map((pg, i) =>
                               i === cur
-                                ? { ...pg, sound: { ...pg.sound, file: r.url, name: r.name, sourcePath: r.sourcePath || '' } }
+                                ? upsertPageBackgroundSound(pg, { file: r.url, name: r.name, sourcePath: r.sourcePath || '', autoPlay: true })
                                 : pg,
                             ),
                           )
@@ -11095,7 +13812,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                           onClick={() =>
                             setPages((prev) =>
                               prev.map((pg, i) =>
-                                i === cur ? { ...pg, sound: { ...pg.sound, file: '', name: '' } } : pg,
+                                i === cur ? upsertPageBackgroundSound(pg, { file: '', name: '', sourcePath: '' }) : pg,
                               ),
                             )
                           }
@@ -11105,6 +13822,15 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                     {currentPage.sound?.name && (
                       <div className="pg-media-name">♪ {currentPage.sound.name}</div>
                     )}
+                    {pageAudioElementsByLane.background.map((el) => (
+                      <div key={el.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--t2)', marginTop: 3 }}>
+                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{el.elLabel || el.mediaName || 'Page Background Sound'}</span>
+                        <button
+                          title="Select background sound timeline clip"
+                          onClick={() => { setSelId(el.id); setSelIds([el.id]); setInspectorTab('props') }}
+                        >Sel</button>
+                      </div>
+                    ))}
                     {currentPage.sound?.file && (
                       <label>
                         <input
@@ -11113,7 +13839,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                           onChange={(e) =>
                             setPages((prev) =>
                               prev.map((pg, i) =>
-                                i === cur ? { ...pg, sound: { ...pg.sound, loops: e.target.checked } } : pg,
+                                i === cur ? upsertPageBackgroundSound(pg, { loops: e.target.checked }) : pg,
                               ),
                             )
                           }
@@ -11384,13 +14110,24 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
             onPagesReorder={playIdx < 0 ? (newPgs) => { pushHistory(true); setPages(newPgs) } : undefined}
             onPageClick={(i) => { if (playIdx < 0) goToPage(i) }}
             onPageSelect={playIdx < 0 ? handlePageSelect : undefined}
+            onElementSelect={playIdx < 0 ? (pageIdx, elementId) => {
+              setCur(Math.max(0, Math.min(pageIdx, pages.length - 1)))
+              setSelId(elementId)
+              setSelIds([elementId])
+              setInspectorTab('props')
+            } : undefined}
             selectedPageIds={selectedPageIds}
             presentationAudio={presentationAudio?.file ? presentationAudio : null}
             presAudioEl={outerPresAudioRef.current}
             onPageAdd={playIdx < 0 ? () => executeCommand('page-new') : undefined}
             onPageDelete={playIdx < 0 ? () => executeCommand('page-delete') : undefined}
             onAudioChange={playIdx < 0 ? (updates) => setPresentationAudio(prev => ({ ...prev, ...updates })) : undefined}
-            onResyncAudio={playIdx < 0 ? () => setShowKaraokeResync(true) : undefined}
+            onPreviewPageAudio={previewTimelineAudioClip}
+            onStopPageAudioPreview={stopTimelineAudioPreview}
+            onResyncAudio={playIdx < 0 ? () => {
+              setPages((prev) => prev.map((pg) => ({ ...pg, timing: { ...(pg.timing || {}) } })))
+              setStatus('Re-synced PAGE AUDIO timing display; page timing modes were not changed.')
+            } : undefined}
           />
         </div>
       )}
@@ -11433,10 +14170,15 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
         <MediaResolveDialog
           state={mediaResolver}
           desktopApi={desktopApi}
-          onApply={(updatedPages) => {
+          onApply={(updatedPages, remainingUnresolved = []) => {
             setPages(updatedPages)
-            setMediaResolver(null)
-            setStatus(`Media resolved — ${updatedPages.flatMap(pg => pg.elements).filter(el => (el.type === 'clip' || el.type === 'mpeg') && el.file?.startsWith('data:')).length} files loaded`)
+            if (remainingUnresolved.length > 0) {
+              setMediaResolver({ unresolvedEls: remainingUnresolved, resolvedPages: updatedPages, open: false })
+              setStatus(`Media resolved — ${remainingUnresolved.length} item(s) still missing; click Resolve Media again for the next folder`)
+            } else {
+              setMediaResolver(null)
+              setStatus(`Media resolved — ${updatedPages.flatMap(pg => pg.elements).filter(el => (el.type === 'clip' || el.type === 'mpeg') && el.file?.startsWith('data:')).length} files loaded`)
+            }
           }}
           onDismiss={() => setMediaResolver(prev => prev ? { ...prev, open: false } : null)}
         />
@@ -11446,6 +14188,15 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
           hasUnsaved={projectHasContent()}
           onApply={applyTemplate}
           onCancel={() => setNewProjectDlg(false)}
+          onSaveFirst={onSave}
+        />
+      )}
+      {importTemplateDlg && (
+        <NewProjectDialog
+          title="Import Template — Choose Pages To Add"
+          hasUnsaved={false}
+          onApply={prepareTemplateImport}
+          onCancel={() => setImportTemplateDlg(false)}
           onSaveFirst={onSave}
         />
       )}
@@ -11568,11 +14319,73 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
         <ImportPagesDialog
           importedData={importPagesData}
           onCancel={() => setImportPagesData(null)}
-          onImport={(selectedPages, insertMode) => {
-            const newPages = selectedPages.map(pg => ({
+          onImport={async (selectedPages, insertMode) => {
+            let newPages = selectedPages.map(pg => ({
               ...pg,
               id: uid(),
               elements: (pg.elements || []).map(el => ({ ...el, id: uid() })),
+            }))
+
+            const mediaPathExistsForImport = async (filePath) => {
+              const p = String(filePath || '')
+              if (!p || !isUnresolvedMediaPath(p)) return true
+              if (!desktopApi?.mediaExists) return true
+              try {
+                const result = await desktopApi.mediaExists({ filePath: p })
+                return !!result?.exists
+              } catch {
+                return false
+              }
+            }
+            const hydrateSourcePathForImport = async (srcPath, kind = '') => {
+              const p = String(srcPath || '')
+              if (!p || !isUnresolvedMediaPath(p)) return { exists: true, url: p }
+              if (!(await mediaPathExistsForImport(p))) return { exists: false, url: '' }
+              const mediaKind = kind || (/\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(p) ? 'audio' : /\.(mp4|mov|webm|mkv|avi|wmv|flv|m4v|gif|apng)(\?|#|$)/i.test(p) ? 'video' : 'image')
+              if (mediaKind === 'image' && desktopApi?.readMediaDataUrl) {
+                try {
+                  const loaded = await desktopApi.readMediaDataUrl({ filePath: p, category: 'image' })
+                  if (loaded?.ok && loaded.dataUrl) return { exists: true, url: internDataUrl(loaded.dataUrl, p) }
+                } catch { /* fall back to media server URL */ }
+              }
+              return { exists: true, url: makeAppMediaUrl(p) }
+            }
+            const hydrateTrackForImport = async (track) => {
+              if (!track) return track
+              const srcPath = track.sourcePath || (track.file && isUnresolvedMediaPath(track.file) ? track.file : '')
+              if (!srcPath) return track
+              const resolved = await hydrateSourcePathForImport(srcPath, 'audio')
+              return resolved.exists ? { ...track, file: resolved.url, sourcePath: srcPath } : track
+            }
+            newPages = await Promise.all(newPages.map(async (pg) => {
+              const bgPath = pg.bgMediaSourcePath || (pg.bgImage && isUnresolvedMediaPath(pg.bgImage) ? pg.bgImage : '')
+              let nextPage = { ...pg }
+              if (bgPath) {
+                const bg = await hydrateSourcePathForImport(bgPath, pg.bgMediaKind || 'image')
+                if (bg.exists && bg.url) nextPage = { ...nextPage, bgMediaSrc: bg.url, bgImage: bg.url, bgMediaSourcePath: bgPath }
+              }
+              const sound = await hydrateTrackForImport(nextPage.sound)
+              const narration = await hydrateTrackForImport(nextPage.narration)
+              const narration2 = await hydrateTrackForImport(nextPage.narration2)
+              const pageAudioClips = Array.isArray(nextPage.pageAudioClips)
+                ? await Promise.all(nextPage.pageAudioClips.map(hydrateTrackForImport))
+                : nextPage.pageAudioClips
+              const elements = await Promise.all((nextPage.elements || []).map(async (el) => {
+                let nextEl = { ...el }
+                const sourcePath = el.mediaSourcePath || (el.file && isUnresolvedMediaPath(el.file) ? el.file : '')
+                if (sourcePath && (el.type === 'clip' || el.type === 'mpeg')) {
+                  const mediaKind = el.mediaKind || (/\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(sourcePath) ? 'audio' : /\.(mp4|mov|webm|mkv|avi|wmv|flv|m4v|gif|apng)(\?|#|$)/i.test(sourcePath) ? 'video' : 'image')
+                  const resolved = await hydrateSourcePathForImport(sourcePath, mediaKind)
+                  if (resolved.exists && resolved.url) nextEl = { ...nextEl, file: resolved.url, mediaSourcePath: sourcePath, mediaKind }
+                }
+                const btnSourcePath = el.btnImageSourcePath || (el.btnImage && isUnresolvedMediaPath(el.btnImage) ? el.btnImage : '')
+                if (btnSourcePath && el.type === 'button') {
+                  const resolved = await hydrateSourcePathForImport(btnSourcePath, 'image')
+                  if (resolved.exists && resolved.url) nextEl = { ...nextEl, btnImage: resolved.url, btnImageSourcePath: btnSourcePath }
+                }
+                return nextEl
+              }))
+              return { ...nextPage, sound, narration, narration2, pageAudioClips, elements }
             }))
 
             // ── 1. Merge imported projectVars (skip duplicates by name) ──
@@ -11582,6 +14395,9 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                 const toAdd = (importPagesData.projectVars || []).filter(v => !existingNames.has(v.name))
                 return toAdd.length ? [...prev, ...toAdd] : prev
               })
+            }
+            if (importPagesData?.pronunciationRules) {
+              setProjectPronunciationRules((prev) => combinePronunciationRules(prev, importPagesData.pronunciationRules))
             }
 
             // ── 2. Compute the full merged pages array ──
@@ -11597,10 +14413,11 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
 
             // ── 3. Scan imported pages for unresolved media ──
             const unresolvedEls = []
-            newPages.forEach((pg, localIdx) => {
+            for (let localIdx = 0; localIdx < newPages.length; localIdx += 1) {
+              const pg = newPages[localIdx]
               const pageIdx = insertOffset + localIdx
               const bgPath = pg.bgMediaSourcePath || (pg.bgImage && isUnresolvedMediaPath(pg.bgImage) ? pg.bgImage : null)
-              if (bgPath && isUnresolvedMediaPath(bgPath)) {
+              if (bgPath && isUnresolvedMediaPath(bgPath) && !(await mediaPathExistsForImport(bgPath))) {
                 const bgName = pg.bgMediaName || bgPath.split(/[/\\]/).pop() || bgPath
                 unresolvedEls.push({
                   pageIdx,
@@ -11612,32 +14429,49 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').cat
                   fullRef: bgPath,
                 })
               }
-              ;(pg.elements || []).forEach((el, elIdx) => {
-                if ((el.type === 'clip' || el.type === 'mpeg') && el.file && isUnresolvedMediaPath(el.file)) {
-                  const fileName = el.mediaName || el.file.split(/[/\\]/).pop() || el.file
+              const trackRefs = [
+                ['sound', pg.sound],
+                ['narration', pg.narration],
+                ['narration2', pg.narration2],
+              ]
+              ;(pg.pageAudioClips || []).forEach((clip, clipIdx) => trackRefs.push([`pageAudioClips.${clipIdx}`, clip]))
+              for (const [field, track] of trackRefs) {
+                const trackPath = track?.sourcePath || (track?.file && isUnresolvedMediaPath(track.file) ? track.file : '')
+                if (trackPath && isUnresolvedMediaPath(trackPath) && !(await mediaPathExistsForImport(trackPath))) {
+                  const fileName = track?.name || trackPath.split(/[/\\]/).pop() || trackPath
+                  unresolvedEls.push({ pageIdx, elIdx: -1, field, srcPath: trackPath, mediaName: fileName, filename: fileName, fullRef: trackPath })
+                }
+              }
+              for (let elIdx = 0; elIdx < (pg.elements || []).length; elIdx += 1) {
+                const el = pg.elements[elIdx]
+                const elPath = el.mediaSourcePath || (el.file && isUnresolvedMediaPath(el.file) ? el.file : '')
+                if ((el.type === 'clip' || el.type === 'mpeg') && elPath && isUnresolvedMediaPath(elPath) && !(await mediaPathExistsForImport(elPath))) {
+                  const fileName = el.mediaName || elPath.split(/[/\\]/).pop() || elPath
                   unresolvedEls.push({
                     pageIdx,
                     elIdx,
                     field: 'file',
-                    srcPath: el.file,
+                    srcPath: elPath,
                     mediaName: fileName,
                     filename: fileName,
-                    fullRef: el.file,
+                    fullRef: elPath,
                   })
-                } else if (el.type === 'button' && el.btnImage && isUnresolvedMediaPath(el.btnImage)) {
-                  const btnName = el.mediaName || el.btnImage.split(/[/\\]/).pop() || el.btnImage
+                } else if (el.type === 'button') {
+                  const btnPath = el.btnImageSourcePath || (el.btnImage && isUnresolvedMediaPath(el.btnImage) ? el.btnImage : '')
+                  if (!btnPath || !isUnresolvedMediaPath(btnPath) || (await mediaPathExistsForImport(btnPath))) continue
+                  const btnName = el.mediaName || btnPath.split(/[/\\]/).pop() || btnPath
                   unresolvedEls.push({
                     pageIdx,
                     elIdx,
                     field: 'btnImage',
-                    srcPath: el.btnImage,
+                    srcPath: btnPath,
                     mediaName: btnName,
                     filename: btnName,
-                    fullRef: el.btnImage,
+                    fullRef: btnPath,
                   })
                 }
-              })
-            })
+              }
+            }
 
             // ── 4. Apply pages and close dialog ──
             setPages(fullPages)

@@ -21,8 +21,22 @@ const QUALITY_LABEL = { medium: 'Medium', high: '★ High', low: 'Low' }
 export default function PiperTTSPanel({
   /** Initial text to synthesize (optional — user can edit) */
   initialText = '',
+  /** Optional batch of text items: [{ id, text, label }] */
+  batchTexts = [],
+  /** Preferred voice for the selected text element */
+  initialVoiceId = '',
+  /** Preferred speech rate for the selected text element */
+  initialRate = 1,
+  /** Called when the user picks a voice */
+  onVoiceChange,
+  /** Called when the user changes speech rate */
+  onRateChange,
   /** Called when synthesis completes — receives { path, name } */
   onSynthesized,
+  /** Called when a multi-text batch completes — receives [{ path, name, duration, ... }] */
+  onSynthesizedBatch,
+  /** Optional filename prefix for committed WAV files */
+  outputNamePrefix = 'PAGE_AUDIO',
   /** Called when user closes/collapses the panel */
   onClose,
   /** Compact mode — show only essential controls */
@@ -34,13 +48,14 @@ export default function PiperTTSPanel({
   const [voices, setVoices] = useState(/** @type {VoiceEntry[]} */([]))
   const [selectedVoice, setSelectedVoice] = useState('')
   const [text, setText] = useState(initialText)
-  const [rate, setRate] = useState(1)
+  const [rate, setRate] = useState(Number(initialRate) || 1)
   const [status, setStatus] = useState('')
   const [downloading, setDownloading] = useState(false)
   const [installingBinary, setInstallingBinary] = useState(false)
   const [progress, setProgress] = useState({ stage: '', percent: 0, detail: '' })
   const [synthesizing, setSynthesizing] = useState(false)
   const [previewUrl, setPreviewUrl] = useState('')
+  const previewAudioRef = useRef(null)
   const removeListenerRef = useRef(null)
   const mediaServerPort = desktop?.mediaServerPort || 0
 
@@ -49,11 +64,13 @@ export default function PiperTTSPanel({
     try {
       const list = /** @type {VoiceEntry[]} */ (await desktop.tts.voicesCatalog())
       setVoices(list)
-      if (!selectedVoice && list.length) setSelectedVoice(list[0].id)
+      const preferred = initialVoiceId && list.some((v) => v.id === initialVoiceId) ? initialVoiceId : selectedVoice
+      if (!preferred && list.length) setSelectedVoice(list[0].id)
+      else if (preferred && preferred !== selectedVoice) setSelectedVoice(preferred)
     } catch (err) {
       setStatus('Failed to load voice catalog: ' + err.message)
     }
-  }, [hasPiper, desktop, selectedVoice])
+  }, [hasPiper, desktop, selectedVoice, initialVoiceId])
 
   useEffect(() => {
     loadVoices()
@@ -66,6 +83,26 @@ export default function PiperTTSPanel({
   useEffect(() => {
     if (initialText) setText(initialText)
   }, [initialText])
+
+  useEffect(() => {
+    if (initialVoiceId) setSelectedVoice(initialVoiceId)
+  }, [initialVoiceId])
+
+  useEffect(() => {
+    const nextRate = Number(initialRate) || 1
+    setRate(nextRate)
+  }, [initialRate])
+
+  const handleVoiceSelect = (voiceId) => {
+    setSelectedVoice(voiceId)
+    if (onVoiceChange) onVoiceChange(voiceId, voices.find((v) => v.id === voiceId) || null)
+  }
+
+  const handleRateSelect = (nextRate) => {
+    const cleanRate = Number(nextRate) || 1
+    setRate(cleanRate)
+    if (onRateChange) onRateChange(cleanRate)
+  }
 
   const handleDownload = async () => {
     if (!hasPiper || !selectedVoice || downloading) return
@@ -121,27 +158,135 @@ export default function PiperTTSPanel({
     }
   }
 
-  const handleSynthesize = async () => {
-    if (!hasPiper || !selectedVoice || !text.trim() || synthesizing) return
+  const makeOutputName = (item, index, preview = false) => {
+    const rawLabel = String(item?.label || item?.text || 'speech')
+      .replace(/[<>:"/\\|?*]/g, '-')
+    const sanitizedLabel = Array.from(rawLabel, (ch) => (ch.charCodeAt(0) < 32 ? '-' : ch)).join('')
+    const label = sanitizedLabel
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 44)
+      .replace(/\s+/g, '-')
+    const seq = String(index + 1).padStart(3, '0')
+    return `${preview ? 'PREVIEW_' : ''}${outputNamePrefix}_${seq}_${label || 'speech'}_piper.wav`
+  }
+
+  const playPreview = (url) => {
+    try {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current = null
+      }
+      const audio = new Audio(url)
+      previewAudioRef.current = audio
+      audio.play().catch(() => {})
+    } catch { /* ignore preview errors */ }
+  }
+
+  const measureAudioDuration = useCallback((filePath) => new Promise((resolve) => {
+    if (!filePath || !mediaServerPort) {
+      resolve(0)
+      return
+    }
+    let audio = null
+    let timer = null
+    let settled = false
+    const finish = (duration) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (audio) {
+        try {
+          audio.removeAttribute('src')
+          audio.load()
+        } catch { /* ignore metadata cleanup */ }
+      }
+      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0)
+    }
+    try {
+      const url = `http://127.0.0.1:${mediaServerPort}/?p=${encodeURIComponent(filePath)}`
+      audio = new Audio(url)
+      audio.preload = 'metadata'
+      audio.addEventListener('loadedmetadata', () => finish(audio.duration), { once: true })
+      audio.addEventListener('error', () => finish(0), { once: true })
+      timer = setTimeout(() => finish(0), 5000)
+      audio.load()
+    } catch {
+      finish(0)
+    }
+  }), [mediaServerPort])
+
+  const handleSynthesize = async (previewOnly = false) => {
+    const batch = Array.isArray(batchTexts) ? batchTexts.filter((item) => String(item?.text || '').trim()) : []
+    const hasText = batch.length > 1 || text.trim()
+    if (!hasPiper || !selectedVoice || !hasText || synthesizing) return
     const voice = voices.find((v) => v.id === selectedVoice)
-    if (!voice?.downloaded) {
+    if (batch.length <= 1 && !voice?.downloaded) {
       setStatus('⚠ Download this voice first.')
       return
     }
     setSynthesizing(true)
     setStatus('Synthesizing…')
     try {
-      const result = await desktop.tts.synthesize({ text: text.trim(), voiceId: selectedVoice, rate })
-      if (result.ok) {
+      const items = previewOnly
+        ? [{ id: '', text: (batch[0]?.text || text).trim(), label: batch[0]?.label || 'preview', voiceId: batch[0]?.voiceId || selectedVoice, rate: batch[0]?.rate ?? rate }]
+        : (batch.length > 1 ? batch : [{ id: '', text: text.trim(), label: '' }])
+      const results = []
+      let batchOffset = 0
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i]
+        const itemVoiceId = item.voiceId || selectedVoice
+        const itemVoice = voices.find((v) => v.id === itemVoiceId)
+        if (!itemVoice?.downloaded || !itemVoice?.piperReady) {
+          setStatus(`⚠ Download/install voice first: ${itemVoice?.label || itemVoiceId}`)
+          return
+        }
+        const itemRate = Number(item.rate ?? rate) || 1
+        setStatus(items.length > 1 ? `Synthesizing ${i + 1}/${items.length}…` : 'Synthesizing…')
+        const result = await desktop.tts.synthesize({
+          text: String(item.text || '').trim(),
+          voiceId: itemVoiceId,
+          rate: itemRate,
+          outputName: makeOutputName(item, i, previewOnly),
+        })
+        if (!result.ok) {
+          setStatus('❌ Synthesis failed: ' + result.error)
+          return
+        }
+        const measuredDuration = await measureAudioDuration(result.path)
+        const name = result.path.split(/[\\/]/).pop() || 'speech.wav'
+        const textPreview = String(item.text || '').slice(0, 120)
+        const payload = {
+          path: result.path,
+          name,
+          textElementId: item.id || '',
+          textPreview,
+          batchIndex: i,
+          batchTotal: items.length,
+          offset: batchOffset,
+          voiceId: itemVoiceId,
+          voiceLabel: itemVoice?.label || itemVoiceId,
+          rate: itemRate,
+          duration: measuredDuration || 0,
+          mediaDuration: measuredDuration || 0,
+        }
+        results.push(payload)
+        const wordCount = String(item.text || '').trim().split(/\s+/).filter(Boolean).length
+        batchOffset += (measuredDuration || Math.max(1.2, wordCount / 2.4)) + 0.35
+      }
+      if (!previewOnly) {
+        if (results.length > 1 && onSynthesizedBatch) onSynthesizedBatch(results)
+        else if (onSynthesized) results.forEach((payload) => onSynthesized(payload))
+      }
+      const result = results[0]
+      if (result) {
         // Build media server URL for in-app preview
         if (mediaServerPort) {
           const url = `http://127.0.0.1:${mediaServerPort}/?p=${encodeURIComponent(result.path)}`
           setPreviewUrl(url)
+          if (previewOnly) playPreview(url)
         }
-        setStatus('✅ Done! File: ' + result.path.split(/[\\/]/).pop())
-        if (onSynthesized) onSynthesized({ path: result.path, name: result.path.split(/[\\/]/).pop() || 'speech.wav' })
-      } else {
-        setStatus('❌ Synthesis failed: ' + result.error)
+        setStatus(previewOnly ? '▶ Preview ready.' : (results.length > 1 ? `✅ Done! ${results.length} files created.` : '✅ Done! File: ' + result.name))
       }
     } catch (err) {
       setStatus('❌ Error: ' + err.message)
@@ -163,7 +308,8 @@ export default function PiperTTSPanel({
   const voice = voices.find((v) => v.id === selectedVoice)
   const isReady = !!voice?.downloaded
   const piperReady = !!voice?.piperReady
-  const canSynth = isReady && piperReady && !!text.trim() && !synthesizing
+  const batchReady = Array.isArray(batchTexts) && batchTexts.filter((item) => String(item?.text || '').trim()).length > 1
+  const canSynth = isReady && piperReady && (batchReady || !!text.trim()) && !synthesizing
 
   // ── Compact mode (for inline use in inspector) ────────────────────────────
   if (compact) {
@@ -172,7 +318,7 @@ export default function PiperTTSPanel({
         <div style={styles.row}>
           <select
             value={selectedVoice}
-            onChange={(e) => setSelectedVoice(e.target.value)}
+            onChange={(e) => handleVoiceSelect(e.target.value)}
             style={styles.select}
           >
             {voices.map((v) => (
@@ -191,7 +337,7 @@ export default function PiperTTSPanel({
               {downloading ? `${progress.percent}%` : '⬇ Get'}
             </button>
           )}
-          <button onClick={handleSynthesize} disabled={!canSynth} style={styles.btn}>
+          <button onClick={() => handleSynthesize(false)} disabled={!canSynth} style={styles.btn}>
             {synthesizing ? '…' : '🔊 Make'}
           </button>
         </div>
@@ -234,7 +380,7 @@ export default function PiperTTSPanel({
         <label style={styles.label}>Voice</label>
         <select
           value={selectedVoice}
-          onChange={(e) => setSelectedVoice(e.target.value)}
+          onChange={(e) => handleVoiceSelect(e.target.value)}
           style={styles.selectFull}
         >
           {voices.map((v) => (
@@ -273,6 +419,7 @@ export default function PiperTTSPanel({
           onChange={(e) => setText(e.target.value)}
           rows={4}
           placeholder="Type or paste text here…"
+          spellCheck={true}
           style={styles.textarea}
         />
       </div>
@@ -283,7 +430,7 @@ export default function PiperTTSPanel({
         <input
           type="range" min={0.5} max={2} step={0.1}
           value={rate}
-          onChange={(e) => setRate(Number(e.target.value))}
+          onChange={(e) => handleRateSelect(Number(e.target.value))}
           style={{ flex: 1 }}
         />
       </div>
@@ -291,11 +438,18 @@ export default function PiperTTSPanel({
       {/* Synthesize button */}
       <div style={styles.section}>
         <button
-          onClick={handleSynthesize}
+          onClick={() => handleSynthesize(true)}
+          disabled={!canSynth}
+          style={{ ...styles.actionBtn, width: '100%', opacity: canSynth ? 1 : 0.5, background: '#31536b' }}
+        >
+          {synthesizing ? '⏳ Previewing…' : '▶ Preview Voice'}
+        </button>
+        <button
+          onClick={() => handleSynthesize(false)}
           disabled={!canSynth}
           style={{ ...styles.actionBtn, width: '100%', opacity: canSynth ? 1 : 0.5 }}
         >
-          {synthesizing ? '⏳ Synthesizing…' : '🎙 Generate Speech (WAV)'}
+          {synthesizing ? '⏳ Synthesizing…' : '🎙 Commit WAV to Page Audio'}
         </button>
         {!isReady && <div style={styles.hint}>Download a voice first to enable synthesis.</div>}
       </div>

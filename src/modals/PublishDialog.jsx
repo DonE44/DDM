@@ -6,13 +6,20 @@
  *   .mmp   – encrypted ZIP package (custom format) with all assets + player
  *   ZIP    – unencrypted bundle for web hosting
  *
- * Props:
- *   pages        {object[]}   Page objects from app state
- *   stage        {object}     { width, height }
- *   projectVars  {object[]}   Project variable definitions
- *   filename     {string}     Current project filename (used as default title)
- *   onClose      {()=>void}
- *   onStatus     {(msg:string)=>void}
+ * @param {{
+ *   pages: import('../types/desktop-api').SmmPage[],
+ *   stage: import('../types/desktop-api').SmmStage,
+ *   projectVars: object[],
+ *   filename: string,
+ *   presentationAudio?: object,
+ *   defaultOutputFolder?: string,
+ *   onDefaultOutputFolderChange?: (folder: string) => void,
+ *   onClose: () => void,
+ *   onStatus?: (msg: string) => void,
+ *   onExportScript?: () => void,
+ *   onExportBook?: () => void,
+ *   onExportMp4?: () => void,
+ * }} props
  */
 
 import { useState, useCallback } from 'react'

@@ -66,6 +66,7 @@ const BLOCK_DEFS = [
   { type: 'prev-page',     cat: 'navigate',  label: 'PREV page',           color: '#0d47a1', icon: '◀', desc: 'Go to the previous page' },
   // Math
   { type: 'random',        cat: 'math',      label: 'RANDOM number',       color: '#6a1b9a', icon: '🎲', desc: 'Set a variable to a random integer between min and max' },
+  { type: 'shuffle-array', cat: 'math',      label: 'SHUFFLE array',       color: '#7b1fa2', icon: '⇄',  desc: 'Shuffle array items in place, such as card symbols for a new game' },
   // Variables - array support
   { type: 'set-array-item', cat: 'variables', label: 'SET array item',   color: '#1b5e20', icon: '📋', desc: 'Set arr[index] = value. Index can be a variable name.' },
   // Elements - image control
@@ -125,7 +126,8 @@ export function setVarRef(ref, value, scriptVars) {
 /* ─── Condition evaluator ────────────────────────────────────────── */
 export function evalCondition(block, scriptVars) {
   const varVal = String(resolveVarRef(block.condVar ?? '', scriptVars) ?? '')
-  const cmpVal = String(block.condVal ?? '')
+  const resolvedCondVal = resolveVarRef(block.condVal ?? '', scriptVars)
+  const cmpVal = String(resolvedCondVal !== undefined ? resolvedCondVal : block.condVal ?? '')
   const op = block.condOp || '=='
   let result = false
   if (op === '==')  result = varVal === cmpVal
@@ -138,7 +140,8 @@ export function evalCondition(block, scriptVars) {
   // Second condition (AND / OR)
   if (block.condLogic && block.condVar2) {
     const v2 = String(resolveVarRef(block.condVar2 ?? '', scriptVars) ?? '')
-    const c2 = String(block.condVal2 ?? '')
+    const resolvedCondVal2 = resolveVarRef(block.condVal2 ?? '', scriptVars)
+    const c2 = String(resolvedCondVal2 !== undefined ? resolvedCondVal2 : block.condVal2 ?? '')
     const o2 = block.condOp2 || '=='
     let r2 = false
     if (o2 === '==')  r2 = v2 === c2
@@ -151,6 +154,13 @@ export function evalCondition(block, scriptVars) {
     if (block.condLogic === 'OR')  result = result || r2
   }
   return result
+}
+
+function resolveTemplateText(value, scriptVars) {
+  return String(value ?? '').replace(/\{([^}]+)\}/g, (_, ref) => {
+    const resolved = resolveVarRef(ref, scriptVars)
+    return resolved !== undefined ? String(resolved) : ''
+  })
 }
 
 /* ─── Script execution engine (async) ───────────────────────────── */
@@ -209,6 +219,19 @@ export async function executeScript(blocks, scriptVars, pages, navigateFn, elCtr
           scriptVars[block.varName] = Math.floor(Math.random() * (max - min + 1)) + min
         }
         break
+
+      case 'shuffle-array': {
+        const arrName = String(block.arrName || block.varName || '')
+        const size = Math.max(0, Number(block.size ?? 0))
+        if (!arrName || size <= 1) break
+        const arr = Array.from({ length: size }, (_, i) => resolveVarRef(`${arrName}[${i}]`, scriptVars))
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1))
+          ;[arr[i], arr[j]] = [arr[j], arr[i]]
+        }
+        arr.forEach((value, i) => setVarRef(`${arrName}[${i}]`, value ?? '', scriptVars))
+        break
+      }
 
       case 'set-array-item': {
         if (block.arrRef) {
@@ -294,25 +317,22 @@ export async function executeScript(blocks, scriptVars, pages, navigateFn, elCtr
         break
 
       case 'show-el':
-        elCtrlFn?.(block.elLabel, 'show')
+        elCtrlFn?.(resolveTemplateText(block.elLabel, scriptVars), 'show')
         break
 
       case 'hide-el':
-        elCtrlFn?.(block.elLabel, 'hide')
+        elCtrlFn?.(resolveTemplateText(block.elLabel, scriptVars), 'hide')
         break
 
       case 'set-text': {
         const rawTxt = String(block.textValue ?? '')
-        const txt = rawTxt.replace(/\{([^}]+)\}/g, (_, ref) => {
-          const resolved = resolveVarRef(ref, scriptVars)
-          return resolved !== undefined ? String(resolved) : ''
-        })
-        elCtrlFn?.(block.elLabel, 'set-text', txt)
+        const txt = resolveTemplateText(rawTxt, scriptVars)
+        elCtrlFn?.(resolveTemplateText(block.elLabel, scriptVars), 'set-text', txt)
         break
       }
 
       case 'set-opacity':
-        elCtrlFn?.(block.elLabel, 'set-opacity', Number(block.opacity ?? 100))
+        elCtrlFn?.(resolveTemplateText(block.elLabel, scriptVars), 'set-opacity', Number(block.opacity ?? 100))
         break
 
       case 'go-to': {
@@ -544,10 +564,10 @@ function ScriptBlock({ block, vars, pages, elements, onChange, onDelete, onMoveU
           <div className="ve-block-row">
             <div className="ve-field">
               <label className="ve-lbl">Text element</label>
-              {elOpts.filter(o => (elements||[]).find(e=>e.elLabel===o.value)?.type==='text').length > 0 ? (
+              {elOpts.filter(o => ['text', 'button'].includes((elements||[]).find(e=>e.elLabel===o.value)?.type)).length > 0 ? (
                 <select className="ve-sel" value={block.elLabel || ''} onChange={e => upd('elLabel', e.target.value)}>
-                  <option value="">— choose text element —</option>
-                  {elOpts.filter(o => (elements||[]).find(e=>e.elLabel===o.value)?.type==='text').map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  <option value="">— choose text/button element —</option>
+                  {elOpts.filter(o => ['text', 'button'].includes((elements||[]).find(e=>e.elLabel===o.value)?.type)).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
               ) : (
                 <input className="ve-inp" value={block.elLabel || ''} onChange={e => upd('elLabel', e.target.value)} placeholder="element label…" />
@@ -603,6 +623,19 @@ function ScriptBlock({ block, vars, pages, elements, onChange, onDelete, onMoveU
             <div className="ve-field">
               <label className="ve-lbl">Max</label>
               <input className="ve-inp ve-inp-sm" type="number" value={block.max ?? 10} onChange={e => upd('max', e.target.value)} />
+            </div>
+          </div>
+        )}
+
+        {block.type === 'shuffle-array' && (
+          <div className="ve-block-row">
+            <div className="ve-field">
+              <label className="ve-lbl">Array name</label>
+              <input className="ve-inp" list="ve-var-datalist" value={block.arrName || ''} onChange={e => upd('arrName', e.target.value)} placeholder="mg_sym" />
+            </div>
+            <div className="ve-field">
+              <label className="ve-lbl">Items</label>
+              <input className="ve-inp ve-inp-sm" type="number" min="2" value={block.size ?? 16} onChange={e => upd('size', e.target.value)} />
             </div>
           </div>
         )}
@@ -1133,6 +1166,7 @@ function PageFlowMap({ pages, curPageId, onSelectPage }) {
     }
     scan(page.onStartScript)
     scan(page.onEndScript)
+    ;(page.keyBindings || []).forEach(binding => scan(binding.script))
     if (page.timing?.onEnd === 'goto' && page.timing?.onEndTarget) {
       const t = pages.find(p => p.name === page.timing.onEndTarget)
       if (t) targets.add(t.id)
@@ -1198,7 +1232,8 @@ export function VarInspector({ vars, snapshot }) {
 /* ─── Main VariableEditor Component ─────────────────────────────── */
 export default function VariableEditor({ pages, setPages, projectVars, setProjectVars, curPageIdx, onClose }) {
   const [selectedPageIdx, setSelectedPageIdx] = useState(curPageIdx || 0)
-  const [scriptTab, setScriptTab] = useState('start') // 'start' | 'end'
+  const [scriptTab, setScriptTab] = useState('start') // 'start' | 'end' | 'keys'
+  const [selectedKeyIdx, setSelectedKeyIdx] = useState(0)
 
   const page = pages[selectedPageIdx]
   // Gather all labelled elements across the current page
@@ -1212,6 +1247,40 @@ export default function VariableEditor({ pages, setPages, projectVars, setProjec
 
   const startBlocks = page?.onStartScript || []
   const endBlocks   = page?.onEndScript   || []
+  const keyBindings  = page?.keyBindings || []
+  const activeKeyIdx = keyBindings.length ? Math.min(selectedKeyIdx, keyBindings.length - 1) : 0
+  const selectedKeyBinding = keyBindings[activeKeyIdx] || keyBindings[0]
+
+  const updateKeyBindings = useCallback((updater) => {
+    setPages(prev => prev.map((pg, i) => {
+      if (i !== selectedPageIdx) return pg
+      const current = pg.keyBindings || []
+      const next = typeof updater === 'function' ? updater(current) : updater
+      return { ...pg, keyBindings: next }
+    }))
+  }, [selectedPageIdx, setPages])
+
+  const addKeyBinding = useCallback(() => {
+    updateKeyBindings(current => {
+      const next = [
+        ...current,
+        { id: uid(), label: 'New Key Action', key: 'Enter', enabled: true, script: [] },
+      ]
+      setSelectedKeyIdx(next.length - 1)
+      return next
+    })
+  }, [updateKeyBindings])
+
+  const removeKeyBinding = useCallback((idxToRemove) => {
+    updateKeyBindings(current => current.filter((_, i) => i !== idxToRemove))
+    setSelectedKeyIdx(i => Math.max(0, Math.min(i, keyBindings.length - 2)))
+  }, [keyBindings.length, updateKeyBindings])
+
+  const updateKeyBinding = useCallback((idxToUpdate, updates) => {
+    updateKeyBindings(current => current.map((binding, i) =>
+      i === idxToUpdate ? { ...binding, ...updates } : binding
+    ))
+  }, [updateKeyBindings])
 
   return (
     <div className="ve-overlay">
@@ -1220,8 +1289,8 @@ export default function VariableEditor({ pages, setPages, projectVars, setProjec
         <div className="ve-header">
           <div className="ve-header-left">
             <span className="ve-header-logo">⚡</span>
-            <span className="ve-header-title">Variable &amp; Script Editor</span>
-            <span className="ve-header-sub">FLUXAURA FUSE — Visual Script Programming</span>
+            <span className="ve-header-title">FluxAura Fuse - Visual Script Programming</span>
+            <span className="ve-header-sub">Project variables, page scripts, and visual blocks</span>
           </div>
           <div className="ve-header-right">
             <div className="ve-sys-vars-hint">
@@ -1250,9 +1319,9 @@ export default function VariableEditor({ pages, setPages, projectVars, setProjec
                 >
                   <span className="ve-page-num">{i + 1}</span>
                   <span className="ve-page-name">{pg.name || `Page ${i + 1}`}</span>
-                  {((pg.onStartScript?.length || 0) + (pg.onEndScript?.length || 0)) > 0 && (
+                  {((pg.onStartScript?.length || 0) + (pg.onEndScript?.length || 0) + (pg.keyBindings?.length || 0)) > 0 && (
                     <span className="ve-page-badge">
-                      {(pg.onStartScript?.length || 0) + (pg.onEndScript?.length || 0)}
+                      {(pg.onStartScript?.length || 0) + (pg.onEndScript?.length || 0) + (pg.keyBindings?.length || 0)}
                     </span>
                   )}
                 </button>
@@ -1293,6 +1362,13 @@ export default function VariableEditor({ pages, setPages, projectVars, setProjec
                     ⏹ On Page End
                     {endBlocks.length > 0 && <span className="ve-tab-badge">{endBlocks.length}</span>}
                   </button>
+                  <button
+                    className={`ve-tab ${scriptTab === 'keys' ? 've-tab-active' : ''}`}
+                    onClick={() => setScriptTab('keys')}
+                  >
+                    ⌨ On Key Press
+                    {keyBindings.length > 0 && <span className="ve-tab-badge">{keyBindings.length}</span>}
+                  </button>
                 </div>
 
                 {scriptTab === 'start' && (
@@ -1314,6 +1390,73 @@ export default function VariableEditor({ pages, setPages, projectVars, setProjec
                     elements={pageElements}
                     onChange={b => updatePageScript('onEndScript', b)}
                   />
+                )}
+                {scriptTab === 'keys' && (
+                  <div className="ve-keybind-panel">
+                    <div className="ve-block-row" style={{ alignItems: 'flex-end', marginBottom: 8 }}>
+                      <div className="ve-field">
+                        <label className="ve-lbl">Page key bindings</label>
+                        <select
+                          className="ve-sel"
+                          value={keyBindings.length ? activeKeyIdx : ''}
+                          onChange={e => setSelectedKeyIdx(Number(e.target.value))}
+                        >
+                          {keyBindings.length === 0 && <option value="">No key bindings yet</option>}
+                          {keyBindings.map((binding, i) => (
+                            <option key={binding.id || i} value={i}>
+                              {binding.enabled === false ? 'Off: ' : ''}{binding.key || '(key)'} — {binding.label || 'Key action'}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <button className="ve-add-block-btn" onClick={addKeyBinding}>+ Add Key</button>
+                      {keyBindings.length > 0 && (
+                        <button className="ve-del-btn" onClick={() => removeKeyBinding(activeKeyIdx)}>Remove</button>
+                      )}
+                    </div>
+                    {selectedKeyBinding ? (
+                      <>
+                        <div className="ve-block-row" style={{ marginBottom: 8 }}>
+                          <label className="ve-field">
+                            <span className="ve-lbl">Key</span>
+                            <input
+                              className="ve-inp"
+                              value={selectedKeyBinding.key || ''}
+                              onChange={e => updateKeyBinding(activeKeyIdx, { key: e.target.value })}
+                              placeholder="ArrowUp, w, Enter, Space, Ctrl+Enter"
+                            />
+                          </label>
+                          <label className="ve-field">
+                            <span className="ve-lbl">Label</span>
+                            <input
+                              className="ve-inp"
+                              value={selectedKeyBinding.label || ''}
+                              onChange={e => updateKeyBinding(activeKeyIdx, { label: e.target.value })}
+                              placeholder="Move Up"
+                            />
+                          </label>
+                          <label className="ve-field" style={{ flex: '0 0 auto' }}>
+                            <span className="ve-lbl">Enabled</span>
+                            <input
+                              type="checkbox"
+                              checked={selectedKeyBinding.enabled !== false}
+                              onChange={e => updateKeyBinding(activeKeyIdx, { enabled: e.target.checked })}
+                            />
+                          </label>
+                        </div>
+                        <ScriptCanvas
+                          label={`⌨ WHEN KEY "${selectedKeyBinding.key || '...'}" is pressed on "${page.name || 'this page'}"`}
+                          blocks={selectedKeyBinding.script || []}
+                          vars={projectVars}
+                          pages={pages}
+                          elements={pageElements}
+                          onChange={b => updateKeyBinding(activeKeyIdx, { script: b })}
+                        />
+                      </>
+                    ) : (
+                      <div className="ve-no-page">Add a key binding to create page-level keyboard logic.</div>
+                    )}
+                  </div>
                 )}
               </>
             ) : (

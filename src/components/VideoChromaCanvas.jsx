@@ -15,20 +15,18 @@
  *   maskShape   {object}   { type: 'rect'|'ellipse', x, y, w, h } (all 0–1 normalised), or null
  *   muted       {boolean}  Mute video audio, default true (canvas-based rendering always mutes display canvas)
  *   volume      {number}   Volume 0.0–1.0, default 1.0 (applied to off-screen video)
+ *   onEnded     {Function} Called when the off-screen video finishes.
  
  */
 
 import { useRef, useEffect } from 'react'
+import { hexToRgb } from '../utils/chromaKey.js'
 
 function ignoreError() {}
 
 function parseHex(hex) {
-  const h = (hex || '#000000').replace('#', '')
-  return [
-    parseInt(h.slice(0, 2), 16),
-    parseInt(h.slice(2, 4), 16),
-    parseInt(h.slice(4, 6), 16),
-  ]
+  const rgb = hexToRgb(hex || '#000000').map(v => Number.isFinite(v) ? v : 0)
+  return /** @type {[number, number, number]} */ (rgb)
 }
 
 /** Module-level cache: data URL → blob URL (avoids repeated re-encoding on re-render) */
@@ -36,7 +34,7 @@ const _dataUrlBlobCache = new Map()
 
 /** Resolve URL to something a video element can play quickly in Electron.
  *  - blob: → use as-is (already playable)
- *  - http://127.0.0.1: → use as-is (local media server with range support, fastest path)
+ *  - http://127.0.0.1: → fetch to blob so canvas pixel reads stay available for chroma
  *  - data: → convert once to blob URL, cache to avoid repeated base64 decode
  *  - app-media:/// → IPC extraction (only path that requires IPC now)
  *  - other → fetch → blob URL
@@ -44,7 +42,20 @@ const _dataUrlBlobCache = new Map()
 async function resolveToBlob(src) {
   if (!src) return null
   if (src.startsWith('blob:')) return src
-  if (src.startsWith('http://127.0.0.1:')) return src   // local server, use directly
+
+  // Live chroma must call getImageData() on every frame. Even when the local
+  // media-server URL displays in <video>, direct cross-origin playback can taint
+  // the canvas in Chromium/Electron, which makes the effect a no-op.
+  if (src.startsWith('http://127.0.0.1:')) {
+    try {
+      const resp = await fetch(src)
+      if (resp.ok) {
+        const blob = await resp.blob()
+        return URL.createObjectURL(blob)
+      }
+    } catch { ignoreError() }
+    return src
+  }
 
   // data: URLs → cache-aware blob conversion (avoids 24MB base64 decode on every render)
   if (src.startsWith('data:')) {
@@ -88,7 +99,7 @@ async function resolveToBlob(src) {
   return src
 }
 
-export default function VideoChromaCanvas({ src, chromaColor, tolerance, softness, maskShape, loop = true, muted = true, volume = 1.0, style }) {
+export default function VideoChromaCanvas({ src, chromaColor, tolerance, softness, maskShape, loop = true, muted = true, volume = 1.0, onEnded, style }) {
   const canvasRef = useRef(null)
   const vidRef    = useRef(null)
   const blobRef   = useRef(null)
@@ -100,13 +111,15 @@ export default function VideoChromaCanvas({ src, chromaColor, tolerance, softnes
   const tolRef    = useRef(tolerance)
   const softRef   = useRef(softness)
   const maskRef   = useRef(maskShape)
+  const onEndedRef = useRef(onEnded)
 
   useEffect(() => {
     chromaRef.current = chromaColor
     tolRef.current = tolerance
     softRef.current = softness
     maskRef.current = maskShape
-  }, [chromaColor, tolerance, softness, maskShape])
+    onEndedRef.current = onEnded
+  }, [chromaColor, tolerance, softness, maskShape, onEnded])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -135,8 +148,13 @@ export default function VideoChromaCanvas({ src, chromaColor, tolerance, softnes
     vid.preload = 'auto'
     // Real visible dimensions off-screen — Electron GPU compositor throttles 1×1 hidden videos
     vid.style.cssText = 'position:fixed;top:-2000px;left:-2000px;width:128px;height:72px;pointer-events:none;z-index:-32767'
+    vid.crossOrigin = 'anonymous'
     document.body.appendChild(vid)
     vidRef.current = vid
+    const endedHandler = () => {
+      try { onEndedRef.current?.() } catch { ignoreError() }
+    }
+    vid.addEventListener('ended', endedHandler)
 
     const ctx = canvas.getContext('2d')
     const MAX_W = 640   // limit internal canvas size for CPU performance
@@ -239,6 +257,7 @@ export default function VideoChromaCanvas({ src, chromaColor, tolerance, softnes
       cancelled = true
       if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
       try { vid.pause(); vid.src = '' } catch { ignoreError() }
+      try { vid.removeEventListener('ended', endedHandler) } catch { ignoreError() }
       try { if (document.body.contains(vid)) document.body.removeChild(vid) } catch { ignoreError() }
       if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null }
       vidRef.current = null

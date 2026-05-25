@@ -12,7 +12,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import SmartColorPicker from '../components/SmartColorPicker.tsx'
 import WhisperPanel from '../components/WhisperPanel.jsx'
-import { isWhisperAvailable, transcribe, DEFAULT_WHISPER_MODEL, expandSentencesToWords, generateWordTimestamps } from '../utils/whisperUtils.js'
+import { isWhisperAvailable, transcribe, DEFAULT_WHISPER_MODEL, WHISPER_MODELS, expandSentencesToWords, generateWordTimestamps } from '../utils/whisperUtils.js'
 import { alignLyricsToAudio } from '../utils/lyricAlignUtils.js'
 import { makePage, makeElem } from '../utils/stageUtils.js'
 import WordTranscriptEditor from '../components/WordTranscriptEditor.jsx'
@@ -55,7 +55,10 @@ export default function LyricVideoWizard({
   const [audioUrl, setAudioUrl] = useState('')
   const [audioName, setAudioName] = useState('')
   const [audioSourcePath, setAudioSourcePath] = useState('')
-  const [transcribeResult, setTranscribeResult] = useState({ text: '', segments: [] })
+  const [transcribeResult, setTranscribeResult] = useState({ text: '', segments: [], chunks: [], engine: 'xenova', method: null, model: null, warnings: [], gaps: [] })
+  const [openingLyricsWarning, setOpeningLyricsWarning] = useState('')
+  const [editDebugTab, setEditDebugTab] = useState('lyric-lines')
+  const [pasteSyncModel, setPasteSyncModel] = useState(DEFAULT_WHISPER_MODEL)
   const [lines, setLines] = useState(/** @type {LyricLine[]} */ ([]))
   const [style, setStyle] = useState(DEFAULT_STYLE)
   // bgMedia: array of { url, name, type: 'image'|'video', sourcePath? }
@@ -144,6 +147,105 @@ export default function LyricVideoWizard({
     return `${m}:${sec.padStart(4, '0')}`
   }
 
+  const isLyricCandidate = useCallback((txt) => {
+    const t = String(txt || '').trim()
+    if (!t) return false
+    if (/^\[(music|instrumental|silence|noise)/i.test(t)) return false
+    if (/^\[TRANSCRIPTION GAP/i.test(t)) return false
+    return /[A-Za-z]/.test(t)
+  }, [])
+
+  const dedupeMergedSegments = useCallback((segments) => {
+    const sorted = [...(segments || [])].sort((a, b) => (a?.start ?? Infinity) - (b?.start ?? Infinity))
+    const out = []
+    for (const seg of sorted) {
+      const text = String(seg?.text || '').trim()
+      if (!text) continue
+      const start = Number(seg?.start)
+      const end = Number(seg?.end)
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue
+      const dup = out.some((k) => (
+        Math.abs(k.start - start) < 0.25
+        && Math.abs(k.end - end) < 0.25
+        && String(k.text || '').trim() === text
+      ))
+      if (!dup) out.push({ start, end, text })
+    }
+    return out
+  }, [])
+
+  const buildLyricLinesFromWords = useCallback((words, firstTimedSegmentStart) => {
+    const lyricLines = []
+    if (!Array.isArray(words) || words.length === 0) return lyricLines
+
+    const MAX_CHARS = 56
+    const MAX_DURATION = 4.8
+    const GAP_THRESHOLD_S = 3
+    let cursor = 0
+    let lastPageEnd = 0
+
+    while (cursor < words.length) {
+      const startWord = words[cursor]
+      const start = Number.isFinite(startWord?.start) ? startWord.start : lastPageEnd
+      if (start - lastPageEnd > GAP_THRESHOLD_S) {
+        const gapText = (lastPageEnd < 1 && start >= 15)
+          ? `[POSSIBLE MISSING VOCALS ${lastPageEnd.toFixed(1)}s-${start.toFixed(1)}s — retry/opening section/manual edit]`
+          : ''
+        lyricLines.push({
+          id: uid(),
+          start: Math.round(lastPageEnd * 1000) / 1000,
+          end: Math.round(start * 1000) / 1000,
+          text: gapText,
+          durationMs: Math.round((start - lastPageEnd) * 1000),
+        })
+      }
+
+      let endIdx = cursor
+      let text = ''
+      let end = start
+      while (endIdx < words.length) {
+        const candidate = words[endIdx]
+        const cText = String(candidate?.text || '').replace(/^\s+/, '')
+        const cStart = Number.isFinite(candidate?.start) ? candidate.start : end
+        const cEnd = Number.isFinite(candidate?.end) ? candidate.end : cStart + 0.35
+        const merged = `${text}${text ? ' ' : ''}${cText}`.trim()
+        const span = cEnd - start
+        const shouldBreakOnPause = endIdx > cursor && cStart - end > 0.65
+        const shouldBreakOnPunct = /[,.!?;:]$/.test(text)
+        if (merged.length > MAX_CHARS || span > MAX_DURATION || shouldBreakOnPause || shouldBreakOnPunct) {
+          break
+        }
+        text = merged
+        end = cEnd
+        endIdx += 1
+      }
+
+      if (text) {
+        lyricLines.push({
+          id: uid(),
+          start: Math.round(start * 1000) / 1000,
+          end: Math.round(end * 1000) / 1000,
+          text,
+          durationMs: Math.round((end - start) * 1000),
+        })
+        lastPageEnd = end
+      }
+      cursor = Math.max(cursor + 1, endIdx)
+    }
+
+    if (firstTimedSegmentStart >= 15 && lyricLines.length > 0 && lyricLines[0].start > 8) {
+      lyricLines.unshift({
+        id: uid(),
+        start: 0,
+        end: Math.round(lyricLines[0].start * 1000) / 1000,
+        text: `[POSSIBLE MISSING VOCALS 0.0s-${lyricLines[0].start.toFixed(1)}s — retry/opening section/manual edit]`,
+        durationMs: Math.round(lyricLines[0].start * 1000),
+      })
+    }
+
+    return lyricLines
+  }, [])
+
   // ── Step 1: Pick audio ────────────────────────────────────────────────────
 
   const handlePickAudio = async () => {
@@ -169,62 +271,51 @@ export default function LyricVideoWizard({
 
   // ── Step 2: Transcription results → lines ────────────────────────────────
 
-  const handleTranscribeResult = useCallback(({ text, segments, wordTimestamps }) => {
+  const handleTranscribeResult = useCallback(({ text, segments, chunks, wordTimestamps, engine, method, model, warnings, gaps }) => {
     try {
-      setTranscribeResult({ text: text ?? '', segments: segments ?? [] })
-
-      const safeSegments = Array.isArray(segments) ? segments : []
+      const safeSegments = Array.isArray(segments) ? segments : Array.isArray(chunks) ? chunks : []
+      const orderedSegments = [...safeSegments].sort((a, b) => {
+        const aStart = Number.isFinite(a?.start) ? a.start : Number.POSITIVE_INFINITY
+        const bStart = Number.isFinite(b?.start) ? b.start : Number.POSITIVE_INFINITY
+        return aStart - bStart
+      })
+      setTranscribeResult({
+        text: text ?? '',
+        segments: orderedSegments,
+        chunks: orderedSegments,
+        engine: engine || 'xenova',
+        method: method || null,
+        model: model || DEFAULT_WHISPER_MODEL,
+        warnings: Array.isArray(warnings) ? warnings : [],
+        gaps: Array.isArray(gaps) ? gaps : [],
+      })
 
       // Expand to word-level segments for the interactive editor.
       // ALWAYS start with expanded word list from sentence segments to ensure complete coverage.
       // Only override with real word timestamps if they're available (more accurate).
-      let words = expandSentencesToWords(safeSegments)
+      let words = expandSentencesToWords(orderedSegments)
       if (Array.isArray(wordTimestamps) && wordTimestamps.length > 0) {
-        words = wordTimestamps
+        words = [...wordTimestamps].sort((a, b) => {
+          const aStart = Number.isFinite(a?.start) ? a.start : Number.POSITIVE_INFINITY
+          const bStart = Number.isFinite(b?.start) ? b.start : Number.POSITIVE_INFINITY
+          return aStart - bStart
+        })
       }
 
       setWordSegments(words)
 
-      // ── Build lyric pages from word-level segments ──
-      // Group ~8 words per page so a full song produces 30+ pages instead of 4.
-      // Use ACTUAL word timings (don't assume T=0), and insert blank pages for gaps.
-      const GAP_THRESHOLD_S = 3
-      const WORDS_PER_PAGE = 8
-      const lyricLines = []
-      let i = 0
-      let lastPageEnd = 0
-
-      while (i < words.length) {
-        const group = words.slice(i, i + WORDS_PER_PAGE)
-        const pageText = group.map(w => String(w.text || '').replace(/^\s+/, '')).join(' ').trim()
-        
-        // Use ACTUAL word timings, not assumed values
-        const pageStart = (typeof group[0].start === 'number' && isFinite(group[0].start)) ? group[0].start : lastPageEnd
-        const pageEnd = (typeof group[group.length - 1].end === 'number' && isFinite(group[group.length - 1].end)) ? group[group.length - 1].end : pageStart + 4
-
-        // Blank page for instrument-only gap
-        if (pageStart - lastPageEnd > GAP_THRESHOLD_S) {
-          lyricLines.push({
-            id: uid(),
-            start: Math.round(lastPageEnd * 1000) / 1000,
-            end: Math.round(pageStart * 1000) / 1000,
-            text: '',
-            durationMs: Math.round((pageStart - lastPageEnd) * 1000),
-          })
-        }
-
-        if (pageText) {
-          lyricLines.push({
-            id: uid(),
-            start: Math.round(pageStart * 1000) / 1000,
-            end: Math.round(pageEnd * 1000) / 1000,
-            text: pageText,
-            durationMs: Math.round((pageEnd - pageStart) * 1000),
-          })
-        }
-        lastPageEnd = pageEnd
-        i += WORDS_PER_PAGE
+      const firstTimedSegment = orderedSegments.find((seg) => {
+        const txt = String(seg?.text || '').trim()
+        return txt && isLyricCandidate(txt) && Number.isFinite(seg?.start)
+      })
+      if (firstTimedSegment && firstTimedSegment.start > 15) {
+        setOpeningLyricsWarning(`Possible missing opening lyrics (first lyric at ${firstTimedSegment.start.toFixed(1)}s). Use Retry Opening Section or Paste & Sync.`)
+      } else {
+        setOpeningLyricsWarning('')
       }
+
+      const firstLyricStart = Number.isFinite(firstTimedSegment?.start) ? firstTimedSegment.start : 0
+      const lyricLines = buildLyricLinesFromWords(words, firstLyricStart)
 
       // Safety net — if no segments/words were produced at all
       if (lyricLines.filter(l => l.text).length === 0) {
@@ -244,10 +335,52 @@ export default function LyricVideoWizard({
       setStep(2)
     } catch (err) {
       console.error('[LyricWizard] handleTranscribeResult error:', err)
+      setOpeningLyricsWarning('')
       setLines([{ id: uid(), start: 0, end: 4, text: 'Transcription parse error — edit manually', durationMs: 4000 }])
       setStep(2)
     }
-  }, [])
+  }, [buildLyricLinesFromWords, isLyricCandidate])
+
+  const handleRetryOpeningSection = useCallback(async () => {
+    if (!audioUrl) return
+    try {
+      const res = await transcribe(audioUrl, {
+        audioFilePath: audioSourcePath || undefined,
+        model: DEFAULT_WHISPER_MODEL,
+        wordTimestamps: true,
+        transcriptionMode: 'lyric-vocal-focus',
+        openingSectionOnly: true,
+      })
+      const merged = dedupeMergedSegments([...(transcribeResult.chunks || []), ...(res.segments || [])])
+      handleTranscribeResult({ ...res, chunks: merged, segments: merged })
+      setOpeningLyricsWarning('Opening retry complete. Review early lines and adjust as needed.')
+    } catch (err) {
+      setOpeningLyricsWarning(`Opening retry failed: ${err?.message || String(err)}`)
+    }
+  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribeResult.chunks])
+
+  const handleRetrySelectedSection = useCallback(async () => {
+    if (!audioUrl) return
+    const startInput = window.prompt('Retry section start (seconds):', '0')
+    const endInput = window.prompt('Retry section end (seconds):', '45')
+    const start = Number(startInput)
+    const end = Number(endInput)
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return
+    try {
+      const res = await transcribe(audioUrl, {
+        audioFilePath: audioSourcePath || undefined,
+        model: DEFAULT_WHISPER_MODEL,
+        wordTimestamps: true,
+        transcriptionMode: 'lyric-vocal-focus',
+        sectionStartSec: start,
+        sectionEndSec: end,
+      })
+      const merged = dedupeMergedSegments([...(transcribeResult.chunks || []), ...(res.segments || [])])
+      handleTranscribeResult({ ...res, chunks: merged, segments: merged })
+    } catch (err) {
+      setOpeningLyricsWarning(`Section retry failed: ${err?.message || String(err)}`)
+    }
+  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribeResult.chunks])
 
   // ── Step 2 "Paste & Sync" — align pasted lyrics to audio ──────────────────
 
@@ -261,8 +394,9 @@ export default function LyricVideoWizard({
       if (audioUrl) {
         const res = await transcribe(audioUrl, {
           audioFilePath: audioSourcePath || undefined,
-          model: DEFAULT_WHISPER_MODEL,
+          model: pasteSyncModel,
           wordTimestamps: true,
+          transcriptionMode: 'lyric-vocal-focus',
           onModelProgress: (p) => {
             if (p.status === 'progress' || p.status === 'download') {
               setPasteAlignStatus(`⬇ Downloading Whisper model: ${Math.round(p.progress || 0)}%`)
@@ -274,7 +408,7 @@ export default function LyricVideoWizard({
             if (pct > 0) setPasteAlignStatus(`Transcribing audio… ${pct}%`)
           },
         })
-        whisperWords = res.chunks || []
+        whisperWords = res.wordTimestamps || res.chunks || []
       }
       setPasteAlignStatus('Aligning lyrics to audio timestamps…')
       const aligned = alignLyricsToAudio(trimmed, whisperWords)
@@ -286,7 +420,7 @@ export default function LyricVideoWizard({
     } finally {
       setPasteAligning(false)
     }
-  }, [pasteText, audioUrl, audioSourcePath])
+  }, [pasteText, audioUrl, audioSourcePath, pasteSyncModel])
 
   // ── Step 3 offline translation ─────────────────────────────────────────────
 
@@ -968,6 +1102,7 @@ export default function LyricVideoWizard({
                     <WhisperPanel
                       audioUrl={audioUrl}
                       audioName={audioName}
+                      transcriptionMode="lyric-vocal-focus"
                       onTranscribeComplete={handleTranscribeResult}
                       onInsertText={() => {}}
                       onCreateLyricPages={(lyricLines) => {
@@ -994,6 +1129,18 @@ export default function LyricVideoWizard({
                     placeholder={'Paste your lyrics here…\nOne line per lyric page.\n\nExample:\nWe will rock you\nWe will, we will rock you\nBuddy you\'re a boy make a big noise'}
                     style={{ ...S.textarea, fontSize: 12, lineHeight: 1.6 }}
                   />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>Timing engine for Paste & Sync</label>
+                    <select
+                      value={pasteSyncModel}
+                      onChange={(e) => setPasteSyncModel(e.target.value)}
+                      style={{ ...S.numInput, width: 260 }}
+                    >
+                      {WHISPER_MODELS.filter((m) => ['auto-best', 'Xenova/whisper-medium', 'openai-api', 'whispercpp-medium', 'whispercpp-large'].includes(m.id)).map((m) => (
+                        <option key={m.id} value={m.id}>{m.label}</option>
+                      ))}
+                    </select>
+                  </div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                     <button
                       onClick={handlePasteSync}
@@ -1049,6 +1196,60 @@ export default function LyricVideoWizard({
           {step === 2 && (
             <div style={S.stepBody}>
               <h3 style={S.stepTitle}>Timing Editor — {lines.length} lyric lines</h3>
+
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button onClick={() => setEditDebugTab('lyric-lines')} style={{ ...S.secondaryBtn, background: editDebugTab === 'lyric-lines' ? 'var(--bg3,#2a2a3e)' : undefined }}>Lyric lines tab</button>
+                <button onClick={() => setEditDebugTab('timed-segments')} style={{ ...S.secondaryBtn, background: editDebugTab === 'timed-segments' ? 'var(--bg3,#2a2a3e)' : undefined }}>Timed segments tab</button>
+                <button onClick={() => setEditDebugTab('raw-transcript')} style={{ ...S.secondaryBtn, background: editDebugTab === 'raw-transcript' ? 'var(--bg3,#2a2a3e)' : undefined }}>Raw transcript tab</button>
+                <button onClick={handleRetryOpeningSection} style={S.secondaryBtn}>Retry opening section</button>
+                <button onClick={handleRetrySelectedSection} style={S.secondaryBtn}>Retry selected section</button>
+                <button onClick={() => { setSyncMode('paste'); setStep(1) }} style={S.secondaryBtn}>Paste correct lyrics and sync</button>
+                <button onClick={() => setStep3View('table')} style={S.secondaryBtn}>Tap sync manually</button>
+              </div>
+
+              {transcribeResult?.warnings?.length > 0 && (
+                <div style={{
+                  background: 'rgba(220,38,38,.14)',
+                  border: '1px solid rgba(220,38,38,.5)',
+                  borderRadius: 5,
+                  padding: '8px 10px',
+                  fontSize: 11,
+                  color: 'var(--t1,#eee)',
+                }}>
+                  <strong>Gap warnings:</strong> {transcribeResult.warnings.join(' | ')}
+                </div>
+              )}
+
+              {editDebugTab === 'raw-transcript' && (
+                <div style={{ border: '1px solid var(--border,#333)', borderRadius: 4, padding: 8, maxHeight: 180, overflow: 'auto', background: 'var(--bg2,#1a1a2e)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--t3,#888)', marginBottom: 6 }}>Engine: {transcribeResult.engine || 'xenova'} | Method: {transcribeResult.method || 'unknown'} | Model: {transcribeResult.model || 'unknown'}</div>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: 11 }}>{transcribeResult.text || '(empty transcript)'}</pre>
+                </div>
+              )}
+
+              {editDebugTab === 'timed-segments' && (
+                <div style={{ border: '1px solid var(--border,#333)', borderRadius: 4, padding: 8, maxHeight: 180, overflow: 'auto', background: 'var(--bg2,#1a1a2e)' }}>
+                  {(transcribeResult.chunks || []).slice(0, 200).map((seg, idx) => (
+                    <div key={idx} style={{ fontSize: 11, borderBottom: '1px solid var(--border,#2c3a52)', padding: '3px 0' }}>
+                      <span style={{ color: 'var(--t3,#888)', marginRight: 8 }}>{Number(seg?.start || 0).toFixed(2)}-{Number(seg?.end || 0).toFixed(2)}</span>
+                      {String(seg?.text || '').trim()}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {openingLyricsWarning && (
+                <div style={{
+                  background: 'rgba(245,158,11,.12)',
+                  border: '1px solid rgba(245,158,11,.5)',
+                  borderRadius: 5,
+                  padding: '8px 10px',
+                  fontSize: 11,
+                  color: 'var(--t1,#eee)',
+                }}>
+                  {openingLyricsWarning}
+                </div>
+              )}
 
               {/* ── View toggle tabs ── */}
               <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
@@ -1177,7 +1378,30 @@ export default function LyricVideoWizard({
                             />
                           </td>
                           <td style={{ ...S.td, whiteSpace: 'nowrap' }}>
+                            <button onClick={() => { seekTo(line.start); step3AudioRef.current?.play?.().catch(() => {}) }} style={S.iconBtn} title="Play from line start">▶</button>
+                            <button onClick={() => updateLine(i, 'start', Math.max(0, Math.round((line.start - 0.1) * 10) / 10), true)} style={S.iconBtn} title="Nudge start -0.1s">S-</button>
+                            <button onClick={() => updateLine(i, 'start', Math.round((line.start + 0.1) * 10) / 10, true)} style={S.iconBtn} title="Nudge start +0.1s">S+</button>
+                            <button onClick={() => updateLine(i, 'end', Math.max(line.start + 0.1, Math.round((line.end - 0.1) * 10) / 10), true)} style={S.iconBtn} title="Nudge end -0.1s">E-</button>
+                            <button onClick={() => updateLine(i, 'end', Math.round((line.end + 0.1) * 10) / 10, true)} style={S.iconBtn} title="Nudge end +0.1s">E+</button>
                             <button onClick={() => splitLineNow(i)} style={S.iconBtn} title="Split line at current audio time">✂</button>
+                            <button
+                              onClick={() => {
+                                if (i >= lines.length - 1) return
+                                const merged = `${String(line.text || '').trim()} ${String(lines[i + 1]?.text || '').trim()}`.trim()
+                                setLines(prev => {
+                                  const out = [...prev]
+                                  out[i] = { ...out[i], text: merged, end: out[i + 1].end, durationMs: Math.round((out[i + 1].end - out[i].start) * 1000) }
+                                  out.splice(i + 1, 1)
+                                  return out
+                                })
+                              }}
+                              style={S.iconBtn}
+                              title="Merge with next"
+                            >
+                              ⇄
+                            </button>
+                            <button onClick={() => updateLine(i, 'text', '[instrumental]')} style={S.iconBtn} title="Mark as instrumental">♪</button>
+                            <button onClick={() => updateLine(i, 'text', '[POSSIBLE MISSING VOCAL SECTION]')} style={S.iconBtn} title="Mark as missing vocal section">?</button>
                             <button onClick={() => moveLine(i, -1)} disabled={i === 0} style={{ ...S.iconBtn, opacity: i === 0 ? 0.3 : 1 }} title="Move up">↑</button>
                             <button onClick={() => moveLine(i, 1)} disabled={i === lines.length - 1} style={{ ...S.iconBtn, opacity: i === lines.length - 1 ? 0.3 : 1 }} title="Move down">↓</button>
                             <button onClick={() => insertLineAfterNow(i)} style={{ ...S.iconBtn, color: '#4ade80' }} title={`Insert blank line after this one at ⏱ ${formatTime(audioTime)}`}>＋</button>
@@ -1271,6 +1495,34 @@ export default function LyricVideoWizard({
                         Splits at sentence punctuation.
                       </span>
                     </div>
+
+                    {Array.isArray(transcribeResult.segments) && transcribeResult.segments.length > 0 && (
+                      <div style={{ border: '1px solid var(--border,#333)', borderRadius: 4, overflow: 'hidden' }}>
+                        <div style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t3,#888)', borderBottom: '1px solid var(--border,#333)' }}>
+                          Timed segments preview (chronological)
+                        </div>
+                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+                            <thead>
+                              <tr style={{ background: 'var(--bg2,#222)' }}>
+                                <th style={S.th}>Start</th>
+                                <th style={S.th}>End</th>
+                                <th style={S.th}>Text</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {transcribeResult.segments.map((seg, idx) => (
+                                <tr key={`${idx}-${seg.start}-${seg.end}`} style={{ borderBottom: '1px solid var(--border,#2a2a2a)' }}>
+                                  <td style={S.td}>{Number.isFinite(seg.start) ? seg.start.toFixed(2) : '-'}</td>
+                                  <td style={S.td}>{Number.isFinite(seg.end) ? seg.end.toFixed(2) : '-'}</td>
+                                  <td style={{ ...S.td, wordBreak: 'break-word' }}>{String(seg.text || '')}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </details>
               )}

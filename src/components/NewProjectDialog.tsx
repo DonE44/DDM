@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { PROJECT_TEMPLATES } from '../constants/index.js'
 
 /* ─── New Project Dialog ─────────────────────────────────────────────────── */
-export default function NewProjectDialog({ hasUnsaved, onApply, onCancel, onSaveFirst }) {
+export default function NewProjectDialog({ hasUnsaved, onApply, onCancel, onSaveFirst, title = '✦ New Project — Choose a Template' }) {
   const [phase, setPhase] = useState(hasUnsaved ? 'save' : 'templates')
   const [selCat, setSelCat] = useState('All')
 
@@ -36,7 +36,7 @@ export default function NewProjectDialog({ hasUnsaved, onApply, onCancel, onSave
     <div className="newproj-overlay">
       <div className="newproj-modal">
         <div className="newproj-header">
-          <span>✦ New Project — Choose a Template</span>
+          <span>{title}</span>
           <button className="newproj-close" onClick={onCancel}>✕</button>
         </div>
 

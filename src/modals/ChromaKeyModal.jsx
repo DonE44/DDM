@@ -14,7 +14,7 @@
  * Props:
  *   src      {string}              Current element file URL (blob: or data:)
  *   origSrc  {string|undefined}    Original un-keyed URL (preserved across re-edits)
- *   onApply  {(dataUrl: string) => void}
+ *   onApply  {(dataUrl: string|null, meta: object) => void}
  *   onCancel {() => void}
  */
 
@@ -87,6 +87,28 @@ function drawSelectionPath(ctx, sel) {
     for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y)
     ctx.closePath()
   }
+}
+
+function normalizeSelection(sel, w, h) {
+  if (!sel || !w || !h) return null
+  if (sel.type === 'rect' || sel.type === 'ellipse') {
+    const x = Math.min(sel.x, sel.x + sel.w)
+    const y = Math.min(sel.y, sel.y + sel.h)
+    return {
+      type: sel.type,
+      x: x / w,
+      y: y / h,
+      w: Math.abs(sel.w) / w,
+      h: Math.abs(sel.h) / h,
+    }
+  }
+  if ((sel.type === 'polygon' || sel.type === 'freehand') && Array.isArray(sel.points)) {
+    return {
+      type: sel.type,
+      points: sel.points.map(pt => ({ x: pt.x / w, y: pt.y / h })),
+    }
+  }
+  return null
 }
 
 /**
@@ -201,7 +223,7 @@ export default function ChromaKeyModal({ src, origSrc, mediaKind, onApply, onCan
     (mediaKind && mediaKind !== 'image') ||
     /\.(webm|mp4|ogv|ogg|mov|avi|mkv)(\?|$)/i.test(origSrc || src || '')
       ? '🎬 Extracting frame from video for colour picking…'
-      : '💡 Click the image to pick the background colour, then click Apply.'
+      : '💡 Click the image to pick the background colour, then Apply. The effect stays editable.'
   )
 
   // ── Refs ─────────────────────────────────────────────────────────────────
@@ -408,7 +430,7 @@ export default function ChromaKeyModal({ src, origSrc, mediaKind, onApply, onCan
             snap.width = img.naturalWidth; snap.height = img.naturalHeight
             snap.getContext('2d').drawImage(img, 0, 0)
             onSourceReady(snap, img.naturalWidth, img.naturalHeight)
-            setMsg('💡 Click the image to pick the background colour, then click Apply.')
+            setMsg('💡 Click the image to pick the background colour, then Apply. The effect stays editable.')
             resolve()
           }
           img.onerror = () => {
@@ -708,20 +730,21 @@ export default function ChromaKeyModal({ src, origSrc, mediaKind, onApply, onCan
   const handleApply = useCallback(async () => {
     const hasWork = chromaEnabled || selections.length > 0 || tool === 'livemask'
     if (!hasWork) { setMsg('Enable Colour Key or draw a selection first.'); return }
+    const w = imgRef.current?.naturalWidth || 1
+    const h = imgRef.current?.naturalHeight || 1
+    const chromaSelections = selections.map(sel => normalizeSelection(sel, w, h)).filter(Boolean)
+    const firstSimpleSel = chromaSelections.find(s => s.type === 'rect' || s.type === 'ellipse')
+    const maskShape = tool === 'livemask' ? { ...liveMask } : (firstSimpleSel || null)
 
     // ── For ALL video sources: always use parameter mode (never bake a static PNG).
     // This preserves the video — VideoChromaCanvas applies chroma/mask in real-time.
     if (isVideoSrc) {
-      // Use the liveMask shape, or the first rect/ellipse selection if any
-      const firstSimpleSel = selections.find(s => s.type === 'rect' || s.type === 'ellipse')
-      const maskShape = tool === 'livemask'
-        ? { ...liveMask }
-        : (firstSimpleSel ? { type: firstSimpleSel.type, x: firstSimpleSel.x / (imgRef.current?.naturalWidth || 1), y: firstSimpleSel.y / (imgRef.current?.naturalHeight || 1), w: firstSimpleSel.w / (imgRef.current?.naturalWidth || 1), h: firstSimpleSel.h / (imgRef.current?.naturalHeight || 1) } : null)
       onApply(null, {
         wasVideo: true,
         hasLiveMask: maskShape !== null,
         hasSelections: selections.length > 0,
         liveMaskShape: maskShape,
+        chromaSelections: chromaSelections.length ? chromaSelections : null,
         chromaEnabled,
         chromaColor: chromaEnabled ? chromaColor : null,
         tolerance:   chromaEnabled ? tolerance   : null,
@@ -731,24 +754,18 @@ export default function ChromaKeyModal({ src, origSrc, mediaKind, onApply, onCan
       return
     }
 
-    // ── Image sources: bake a PNG with the mask applied ────────────────────
+    // ── Image sources: store live non-destructive settings. Preview still bakes a temporary PNG.
     if (!imgRef.current) { setMsg('Image not loaded yet.'); return }
-    setProcessing(true); setMsg('Processing…')
-    try {
-      const chromaOpts = chromaEnabled ? { enabled: true, color: chromaColor, tolerance, softness } : null
-      const result = renderMask(imgRef.current, selections, chromaOpts)
-      onApply(result, {
-        wasVideo: false,
-        hasSelections: selections.length > 0,
-        chromaEnabled,
-        chromaColor: chromaEnabled ? chromaColor : null,
-        tolerance:   chromaEnabled ? tolerance   : null,
-        softness:    chromaEnabled ? softness     : null,
-      })
-    } catch (err) {
-      setMsg('Error: ' + (err?.message || err))
-      setProcessing(false)
-    }
+    onApply(null, {
+      wasVideo: false,
+      hasSelections: selections.length > 0,
+      liveMaskShape: maskShape,
+      chromaSelections: chromaSelections.length ? chromaSelections : null,
+      chromaEnabled,
+      chromaColor: chromaEnabled ? chromaColor : null,
+      tolerance:   chromaEnabled ? tolerance   : null,
+      softness:    chromaEnabled ? softness     : null,
+    })
   }, [tool, liveMask, chromaEnabled, chromaColor, tolerance, softness, selections, onApply, isVideoSrc, imageSrc])
 
   // ── Tool switch helper ────────────────────────────────────────────────────
@@ -898,7 +915,7 @@ export default function ChromaKeyModal({ src, origSrc, mediaKind, onApply, onCan
           {/* Video-source notice */}
           {isVideoSrc && !previewUrl && tool !== 'livemask' && (
             <p style={{ fontSize: 11, color: '#ffcc66', margin: '0 0 6px' }}>
-              🎬 Working on extracted video frame — result will be a PNG still image with transparency applied. Use <strong>📐 Live Shape</strong> to keep the video playing with real-time masking.
+              🎬 Working on an extracted video frame for picking only — Apply stores a live editable effect and keeps the video playing.
             </p>
           )}
           {isVideoSrc && tool === 'livemask' && (

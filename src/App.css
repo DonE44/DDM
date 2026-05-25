@@ -6800,6 +6800,13 @@ kbd {
   gap: 4px;
   align-items: center;
 }
+.scp-row-mb6 { margin-bottom: 6px; }
+.scp-row-mt6 { margin-top: 6px; }
+.scp-transparent-label {
+  font-size: 9px;
+  color: var(--t3);
+  margin-left: 2px;
+}
 .scp-name-input {
   flex: 1;
   height: 22px;
@@ -6840,7 +6847,12 @@ kbd {
   justify-content: center;
 }
 .scp-extract-btn:hover { background: rgba(232,160,32,.22); }
+.scp-file-input { display: none; }
 .scp-current {
+  .scp-wheel-btn {
+    padding: 0 4px;
+    min-width: unset;
+  }
   display: flex;
   align-items: center;
   gap: 6px;

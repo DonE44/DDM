@@ -1,3 +1,5 @@
+// @ts-check
+
 /**
  * systemFonts.js — Load and inject system fonts from C:\Windows\Fonts (or OS equivalent)
  *
@@ -6,15 +8,19 @@
  * Results are cached — the IPC call and CSS injection only happen once per session.
  */
 
+/** @typedef {import('../types/desktop-api').SystemFontEntry} SystemFontEntry */
+
+/** @type {SystemFontEntry[] | null} */
 let _cache = null          // [{name, path, file}] once loaded, null before
 let _injected = false       // true once <style> tag has been inserted
+/** @type {Promise<SystemFontEntry[]> | null} */
 let _loadPromise = null     // in-flight promise guard (prevents duplicate calls)
 
 /**
  * Load all system fonts via Electron IPC, inject @font-face CSS, and return
  * the font list. Safe to call multiple times — subsequent calls return the cache.
  *
- * @returns {Promise<Array<{name: string, path: string, file: string}>>}
+ * @returns {Promise<SystemFontEntry[]>}
  */
 export async function loadSystemFonts() {
   if (_cache) return _cache
@@ -56,7 +62,7 @@ export async function loadSystemFonts() {
   return _loadPromise
 }
 
-/** Return cached font list synchronously (empty array if not yet loaded). */
+/** @returns {SystemFontEntry[]} */
 export function getSystemFontCache() {
   return _cache || []
 }

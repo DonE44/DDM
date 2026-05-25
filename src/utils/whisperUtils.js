@@ -17,9 +17,20 @@
  *   const { text, segments } = await transcribe(audioUrl, { model: 'Xenova/whisper-tiny', onProgress })
  */
 
-/** @typedef {{ id: string, label: string, size: string, sizeBytes: number, description: string, electronOnly?: boolean }} WhisperModelInfo */
+/** @typedef {{ id: string, label: string, size: string, sizeBytes: number, description: string, electronOnly?: boolean, license?: string, commercialUse?: boolean, requiresApiKey?: boolean, service?: string }} WhisperModelInfo */
 /** @typedef {{ start: number, end: number, text: string }} WhisperSegment */
-/** @typedef {{ text: string, segments: WhisperSegment[], language: string, chunks?: unknown[], wordTimestamps?: WhisperSegment[], ok?: boolean, error?: string }} WhisperResult */
+/** @typedef {{ text: string, segments: WhisperSegment[], language: string, chunks?: unknown[], wordTimestamps?: WhisperSegment[], engine?: string, method?: string, model?: string, warnings?: string[], gaps?: unknown[], containsGasoline?: boolean, containsFingers?: boolean, containsMatch?: boolean, ok?: boolean, error?: string }} WhisperResult */
+
+/**
+ * Xenova's published env type marks these flags readonly, but v2 expects apps to
+ * configure them at runtime. Keep the mutability cast local to this boundary.
+ * @param {unknown} env
+ */
+function configureBrowserTransformersEnv(env) {
+  const mutableEnv = /** @type {{ allowRemoteModels: boolean, allowLocalModels: boolean }} */ (env)
+  mutableEnv.allowRemoteModels = true
+  mutableEnv.allowLocalModels = false
+}
 
 /**
  * Available Whisper model variants.
@@ -30,11 +41,21 @@
  */
 export const WHISPER_MODELS = /** @type {WhisperModelInfo[]} */ ([
   {
+    id: 'auto-best',
+    label: '★ Auto Best (Xenova + whisper.cpp fallback)',
+    size: 'AUTO',
+    sizeBytes: 0,
+    description: 'Uses Xenova first, then whisper.cpp automatically if local output appears incomplete.',
+    electronOnly: true,
+  },
+  {
     id: 'Xenova/whisper-tiny',
     label: 'Tiny (~75 MB)',
     size: '75MB',
     sizeBytes: 75 * 1024 * 1024,
     description: 'Fastest — usable for clear speech, poor for singing',
+    license: 'MIT',
+    commercialUse: true,
   },
   {
     id: 'Xenova/whisper-base',
@@ -42,6 +63,8 @@ export const WHISPER_MODELS = /** @type {WhisperModelInfo[]} */ ([
     size: '145MB',
     sizeBytes: 145 * 1024 * 1024,
     description: 'Balance of speed & accuracy (~70-75% for music)',
+    license: 'MIT',
+    commercialUse: true,
   },
   {
     id: 'Xenova/whisper-small',
@@ -49,21 +72,42 @@ export const WHISPER_MODELS = /** @type {WhisperModelInfo[]} */ ([
     size: '480MB',
     sizeBytes: 480 * 1024 * 1024,
     description: 'Higher accuracy (~80%)',
+    license: 'MIT',
+    commercialUse: true,
   },
   {
     id: 'Xenova/whisper-medium',
     label: '★ Medium (~1.5 GB) — Best for lyrics (90% accuracy)',
     size: '1.5GB',
     sizeBytes: 1500 * 1024 * 1024,
-    description: 'Perfect for lyric transcription — 90% accuracy, already cached on your computer',
+    description: 'Best local lyric option currently wired in the app; downloads/caches on first use',
+    license: 'MIT',
+    commercialUse: true,
+  },
+  {
+    id: 'whispercpp-medium',
+    label: 'whisper.cpp Medium (local binary/model required)',
+    size: 'LOCAL',
+    sizeBytes: 0,
+    description: 'Runs whisper.cpp locally when whisper-cli/main.exe and a medium model are installed.',
+    electronOnly: true,
+  },
+  {
+    id: 'whispercpp-large',
+    label: 'whisper.cpp Large/Turbo (local binary/model required)',
+    size: 'LOCAL',
+    sizeBytes: 0,
+    description: 'Runs whisper.cpp large/turbo locally when installed.',
+    electronOnly: true,
   },
   {
     id: 'openai-api',
-    label: '☁ OpenAI Whisper API — cloud (best accuracy)',
+    label: '☁ OpenAI Whisper API — cloud service',
     size: 'API',
     sizeBytes: 0,
-    description: 'Best accuracy for music/lyrics. Requires OpenAI API key. Cost: ~$0.006/min.',
+    description: 'OpenAI paid API service. Requires your own OpenAI API key. Current implementation uses whisper-1.',
     requiresApiKey: true,
+    service: 'OpenAI',
   },
 ])
 
@@ -224,6 +268,10 @@ async function transcribeViaOpenAI(audioUrl, apiKey, opts = {}) {
  *   onModelProgress?: (p: object) => void,
  *   onTranscribeProgress?: (pct: number) => void,
  *   wordTimestamps?: boolean,
+ *   transcriptionMode?: 'normal'|'lyric-vocal-focus',
+ *   openingSectionOnly?: boolean,
+ *   sectionStartSec?: number|null,
+ *   sectionEndSec?: number|null,
  * }} [options]
  * @returns {Promise<WhisperResult>}
  */
@@ -235,6 +283,10 @@ export async function transcribe(audioUrl, options = {}) {
     onModelProgress,
     onTranscribeProgress,
     wordTimestamps = true,
+    transcriptionMode = 'normal',
+    openingSectionOnly = false,
+    sectionStartSec = null,
+    sectionEndSec = null,
     apiKey,
     _retryCount = 0,
   } = options
@@ -244,13 +296,20 @@ export async function transcribe(audioUrl, options = {}) {
     return transcribeViaOpenAI(audioUrl, apiKey, { language, onTranscribeProgress })
   }
 
+  const ENGINE_SELECTION_MODELS = ['auto-best', 'whispercpp-medium', 'whispercpp-large']
+  const isEngineSelectionModel = ENGINE_SELECTION_MODELS.includes(model)
+
   // ── Electron IPC path (runs in main/Node.js — no WASM, no CSP issues) ────
   // ONLY use IPC for large models that exceed browser WASM heap limits.
   // Small models work better in browser with @xenova/transformers + Web Audio API.
   const hasIPC = hasElectronIPC()
   const LARGE_MODELS = ['onnx-community/whisper-large-v3', 'onnx-community/whisper-large-v3-turbo', 'Xenova/whisper-medium']
   const isLargeModel = LARGE_MODELS.includes(model)
-  const shouldUseIPC = hasIPC && isLargeModel
+  const shouldUseIPC = hasIPC && (isLargeModel || isEngineSelectionModel)
+
+  const engineSelection = isEngineSelectionModel ? model : 'xenova'
+  const desiredModel = model === 'whispercpp-large' ? 'large' : 'medium'
+  const modelIdForIPC = isEngineSelectionModel ? 'Xenova/whisper-medium' : model
   
   console.log('[whisper] hasElectronIPC:', hasIPC, 'isLargeModel:', isLargeModel, 'shouldUseIPC:', shouldUseIPC)
   
@@ -277,13 +336,19 @@ export async function transcribe(audioUrl, options = {}) {
     }
 
     try {
-      console.log('[whisper] Invoking transcribe with:', { model, audioUrl: audioUrl?.substring(0, 50), audioFilePath })
+      console.log('[whisper] Invoking transcribe with:', { model, modelIdForIPC, engineSelection, audioUrl: audioUrl?.substring(0, 50), audioFilePath })
       const result = await window.smmDesktop.whisper.transcribe({
         audioUrl,
         audioFilePath: audioFilePath || null,
-        modelId: model,
+        modelId: modelIdForIPC,
+        engineSelection,
+        desiredModel,
         language: language || null,
         wordTimestamps,
+        transcriptionMode,
+        openingSectionOnly,
+        sectionStartSec,
+        sectionEndSec,
       })
       console.log('[whisper] IPC returned:', result.ok ? 'success' : 'error', result.error)
       if (!result.ok) {
@@ -312,10 +377,22 @@ export async function transcribe(audioUrl, options = {}) {
         throw err
       }
       if (onTranscribeProgress) onTranscribeProgress(100)
+      const chunkSegments = /** @type {WhisperSegment[]} */ (result.chunks || [])
       return {
         text: result.text,
-        segments: /** @type {WhisperSegment[]} */ (result.chunks || []),
+        segments: chunkSegments,
         language: result.language || language || 'en',
+        wordTimestamps: Array.isArray(result.wordTimestamps) && result.wordTimestamps.length
+          ? /** @type {WhisperSegment[]} */ (result.wordTimestamps)
+          : expandSentencesToWords(chunkSegments),
+        engine: result.engine || 'xenova',
+        method: result.method || null,
+        model: result.model || modelIdForIPC,
+        warnings: Array.isArray(result.warnings) ? result.warnings : [],
+        gaps: Array.isArray(result.gaps) ? result.gaps : [],
+        containsGasoline: !!result.containsGasoline,
+        containsFingers: !!result.containsFingers,
+        containsMatch: !!result.containsMatch,
       }
     } catch (err) {
       console.error('[whisper] IPC transcribe failed:', err.message)
@@ -330,15 +407,14 @@ export async function transcribe(audioUrl, options = {}) {
   // The shared onnxruntime-web is 1.14.0 — v4 needs ORT 1.20+ and throws
   // qdq_actions.cc errors.  v2 was built for ORT 1.14 and is proven compatible.
   const { env } = await import('@xenova/transformers')
-  env.allowRemoteModels = true
-  env.allowLocalModels = false
+  configureBrowserTransformersEnv(env)
 
   // Block onnx-community models and medium in browser — they exceed ORT 1.14 WASM limits.
   // medium (~1.5 GB) throws ORT error code 6 (ORT_RUNTIME_EXCEPTION / OOM) in WASM.
   // onnx-community/* models require ORT 1.20+ ops not available in ORT 1.14.
   // All these work via the Electron IPC path above (Node.js, no WASM heap limit).
   const BROWSER_BLOCKED_MODELS = ['onnx-community/', 'Xenova/whisper-medium']
-  const isBlocked = BROWSER_BLOCKED_MODELS.some(prefix => model.startsWith(prefix))
+  const isBlocked = isEngineSelectionModel || BROWSER_BLOCKED_MODELS.some(prefix => model.startsWith(prefix))
   if (isBlocked) {
     throw new Error(
       `The "${model}" model cannot run in the browser preview — it exceeds the WebAssembly memory limit or requires a newer runtime. ` +
@@ -465,7 +541,12 @@ export async function transcribe(audioUrl, options = {}) {
     }
   }
 
-  return { text: fullText, segments, language: detectedLanguage }
+  return {
+    text: fullText,
+    segments,
+    language: detectedLanguage,
+    wordTimestamps: expandSentencesToWords(segments),
+  }
 }
 
 /**
@@ -583,8 +664,7 @@ export async function loadWhisperPipeline(modelId = DEFAULT_WHISPER_MODEL, optio
   if (_browserPipeline && _browserPipelineModel === modelId) return _browserPipeline
 
   const { pipeline, env } = await import('@xenova/transformers')
-  env.allowRemoteModels = true
-  env.allowLocalModels = false
+  configureBrowserTransformersEnv(env)
 
   try {
     if (env.backends?.onnx?.wasm && typeof SharedArrayBuffer === 'undefined') {

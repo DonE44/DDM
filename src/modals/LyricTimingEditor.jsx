@@ -61,9 +61,9 @@ function applyLinesToPages(allPages, editedLines) {
 
 /**
  * @param {{
- *   pages: any[],
+ *   pages: import('../types/desktop-api').SmmPage[],
  *   presentationAudio: { file:string, name?:string, volume?:number, loop?:boolean } | null,
- *   onSave: (updatedPages: any[]) => void,
+ *   onSave: (updatedPages: import('../types/desktop-api').SmmPage[]) => void,
  *   onClose: () => void,
  * }} props
  */

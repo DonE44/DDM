@@ -8,7 +8,6 @@
  *
  * Props:
  *   pages          {Array}    Page objects from app state
- *   stage          {Object}   { width, height } stage dimensions
  *   onClose        {Function} Close the editor
  *   onNavigatePage {Function} onNavigatePage(pageIdx) — jump to that page
  */

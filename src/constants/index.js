@@ -286,6 +286,7 @@ export const PROJECT_TEMPLATES = [
   { id:'photo-slideshow', cat:'Presentation',           icon:'🖼', label:'Photo Slideshow',           desc:'Auto-advancing photo gallery with smooth crossfade transitions.',               preset:'fhd_1920x1080',  wipeIn:'Fade'    },
   { id:'quiz',            cat:'Educational',            icon:'✅', label:'Quiz / Test',               desc:'Multiple-choice quiz with correct and incorrect answer feedback pages.',        preset:'xga_1024x768',   wipeIn:'ZoomUp'  },
   { id:'puzzle',          cat:'Educational',            icon:'🧩', label:'Interactive Puzzle',        desc:'Activity-based matching or puzzle exercise with reveal pages.',                 preset:'xga_1024x768',   wipeIn:'ZoomUp'  },
+  { id:'maze-game',       cat:'Educational',            icon:'🧭', label:'Maze Game',                 desc:'Editable multi-level maze adventure with character choice, scoring and winner page.', preset:'xga_1024x768', wipeIn:'ZoomUp'  },
   { id:'lesson',          cat:'Educational',            icon:'🎓', label:'Lesson / Tutorial',         desc:'Step-through educational lesson with checkpoint navigation buttons.',           preset:'xga_1024x768',   wipeIn:'Fade'    },
   { id:'memory-game',     cat:'Educational',            icon:'🧠', label:'Memory Game',              desc:'Classic card-flip memory matching game — find all 8 symbol pairs in the fewest flips', preset:'legacy_640x480', wipeIn:'Fade'    },
 ]

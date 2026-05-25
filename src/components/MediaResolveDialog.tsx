@@ -10,11 +10,104 @@ export default function MediaResolveDialog({ state, desktopApi, onApply, onDismi
   const [applyProgress, setApplyProgress] = useState(0)
   const internalFolderRef = useRef(null)
 
-  const needed = [...new Set(unresolvedEls.map((u: {filename?: string}) => (u.filename || '').toLowerCase()).filter(Boolean))] as string[]
+  function looksLikeMediaFilename(name = '') {
+    const clean = String(name || '').trim()
+    if (!clean) return false
+    return /\.(mp3|wav|ogg|flac|aac|m4a|opus|mid|midi|wma|aif|aiff|mp4|webm|avi|mov|mkv|mpeg|mpg|m4v|flc|fli|wmv|ts|m2ts|png|jpe?g|gif|apng|webp|bmp|tiff?|svg|ico|pdf)(\?|#|$)/i.test(clean)
+  }
+
+  const actionableUnresolvedEls = unresolvedEls.filter((u: {filename?: string}) => looksLikeMediaFilename(u.filename || ''))
+  const needed = [...new Set(actionableUnresolvedEls.map((u: {filename?: string}) => (u.filename || '').toLowerCase()).filter(Boolean))] as string[]
+
+  const mediaExts = {
+    video: new Set(['mp4', 'webm', 'avi', 'mov', 'mkv', 'mpeg', 'mpg', 'm4v', 'flc', 'fli', 'wmv', 'ts', 'm2ts']),
+    audio: new Set(['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'mid', 'midi', 'wma', 'aiff', 'aif']),
+    image: new Set(['png', 'jpg', 'jpeg', 'gif', 'apng', 'webp', 'bmp', 'tif', 'tiff', 'svg', 'ico']),
+  }
+
+  function basename(path = '') {
+    return String(path || '').split(/[/\\]/).pop() || String(path || '')
+  }
+
+  function extensionOf(name = '') {
+    const ext = String(name || '').split('.').pop() || ''
+    return ext.toLowerCase()
+  }
+
+  function detectKind(name = '') {
+    const ext = extensionOf(name)
+    if (mediaExts.video.has(ext)) return 'video'
+    if (mediaExts.audio.has(ext)) return 'audio'
+    if (mediaExts.image.has(ext)) return 'image'
+    if (ext === 'pdf') return 'pdf'
+    return 'image'
+  }
+
+  function makePlayableMediaUrl(nativePath = '') {
+    const port = Number(desktopApi?.mediaServerPort || 0)
+    if (port > 0) {
+      return `http://127.0.0.1:${port}/media?p=${encodeURIComponent(String(nativePath || ''))}`
+    }
+    const forward = String(nativePath || '').replace(/\\/g, '/')
+    const encoded = forward.split('/').map((seg, i) => {
+      if (i === 0 && /^[a-zA-Z]:$/.test(seg)) return seg
+      return encodeURIComponent(seg)
+    }).join('/')
+    return `app-media:///${encoded}`
+  }
+
+  async function resolveDesktopEntry(entry) {
+    let sourcePath = entry.path || ''
+    let name = entry.name || basename(sourcePath)
+    let kind = detectKind(name || sourcePath)
+    let capability = null
+
+    if (desktopApi?.mediaCapability && sourcePath) {
+      try {
+        capability = await desktopApi.mediaCapability({ filePath: sourcePath, fileName: name })
+      } catch {
+        capability = null
+      }
+    }
+
+    const capabilityKind = capability?.category || kind
+    if (
+      desktopApi?.transcodeMedia &&
+      sourcePath &&
+      (capability?.support === 'convert-required' || capability?.support === 'partial')
+    ) {
+      const transcode = await desktopApi.transcodeMedia({
+        filePath: sourcePath,
+        category: capabilityKind,
+        support: capability.support,
+        extension: capability.extension,
+      })
+      if (transcode?.ok && transcode.convertedPath) {
+        sourcePath = transcode.convertedPath
+        name = basename(sourcePath) || name
+        kind = detectKind(sourcePath)
+        capability = { ...capability, support: 'native', category: kind }
+      } else if (capability.support === 'convert-required') {
+        return null
+      }
+    }
+
+    kind = capability?.category || kind
+    if (kind === 'video' || kind === 'audio' || kind === 'pdf') {
+      return { fileUrl: makePlayableMediaUrl(sourcePath), sourcePath, name, kind }
+    }
+
+    if (desktopApi?.readMediaDataUrl) {
+      const loaded = await desktopApi.readMediaDataUrl({ filePath: sourcePath, category: kind })
+      if (loaded?.ok && loaded.dataUrl) return { fileUrl: loaded.dataUrl, sourcePath, name, kind: 'image' }
+    }
+
+    return null
+  }
 
   function buildMatches(fmap) {
     const matched = [], miss = []
-    for (const u of unresolvedEls) {
+    for (const u of actionableUnresolvedEls) {
       const key = (u.filename || '').toLowerCase()
       if (key && fmap.has(key)) matched.push({ unresEl: u, entry: fmap.get(key) })
       else miss.push(u)
@@ -62,45 +155,64 @@ export default function MediaResolveDialog({ state, desktopApi, onApply, onDismi
     setApplyProgress(0)
     let updatedPages = resolvedPages.map(pg => ({ ...pg, elements: [...pg.elements] }))
     const total = matches.length
+    const failed = []
 
     for (let i = 0; i < matches.length; i++) {
       const { unresEl, entry } = matches[i]
       try {
-        let fileUrl = ''
+        let resolved = null
         if (entry.file) {
-          fileUrl = await new Promise((res, rej) => {
+          const fileUrl = await new Promise((res, rej) => {
             const reader = new FileReader()
             reader.onload = () => res(String(reader.result || ''))
             reader.onerror = () => rej(reader.error)
             reader.readAsDataURL(entry.file)
           })
-        } else if (entry.path && desktopApi?.readMediaDataUrl) {
-          const kind = entry.name.match(/\.(mp4|webm|avi|mov|mkv|mpeg|mpg|flc|fli)/i) ? 'video'
-            : entry.name.match(/\.(mp3|wav|ogg|flac|aac|m4a|opus|mid|midi)/i) ? 'audio' : 'image'
-          const loaded = await desktopApi.readMediaDataUrl({ filePath: entry.path, category: kind })
-          if (loaded?.ok && loaded.dataUrl) fileUrl = loaded.dataUrl
-          else fileUrl = entry.path
+          resolved = { fileUrl, sourcePath: '', name: entry.name || unresEl.filename || '', kind: detectKind(entry.name || unresEl.filename || '') }
+        } else if (entry.path) {
+          resolved = await resolveDesktopEntry(entry)
         }
 
-        if (fileUrl) {
+        if (resolved?.fileUrl) {
+          const { fileUrl, sourcePath, name, kind } = resolved
           const pg = updatedPages[unresEl.pageIdx]
           if (!pg) {
             continue
           }
           if (unresEl.field === 'bgMedia') {
-            const mediaName = entry.name || unresEl.filename || ''
-            const mediaKind = mediaName.match(/\.(mp4|webm|avi|mov|mkv|mpeg|mpg|flc|fli)$/i)
-              ? 'video'
-              : mediaName.match(/\.(mp3|wav|ogg|flac|aac|m4a|opus|mid|midi)$/i)
-                ? 'audio'
-                : 'image'
             updatedPages[unresEl.pageIdx] = {
               ...pg,
               bgMediaSrc: fileUrl,
               bgImage: fileUrl,
-              bgMediaName: mediaName,
-              bgMediaKind: mediaKind,
-              bgMediaSourcePath: entry.path || pg.bgMediaSourcePath || '',
+              bgMediaName: name || pg.bgMediaName || unresEl.filename || '',
+              bgMediaKind: kind || pg.bgMediaKind || 'image',
+              bgMediaSourcePath: sourcePath || '',
+            }
+            continue
+          }
+
+          if (unresEl.field === 'sound') {
+            updatedPages[unresEl.pageIdx] = {
+              ...pg,
+              sound: {
+                ...(pg.sound || {}),
+                file: fileUrl,
+                name: name || pg.sound?.name || unresEl.filename || '',
+                sourcePath: sourcePath || '',
+              },
+            }
+            continue
+          }
+
+          if (unresEl.field === 'narration') {
+            updatedPages[unresEl.pageIdx] = {
+              ...pg,
+              narration: {
+                ...(pg.narration || {}),
+                file: fileUrl,
+                name: name || pg.narration?.name || unresEl.filename || '',
+                sourcePath: sourcePath || '',
+              },
             }
             continue
           }
@@ -115,21 +227,25 @@ export default function MediaResolveDialog({ state, desktopApi, onApply, onDismi
             pg.elements[unresEl.elIdx] = {
               ...el,
               btnImage: fileUrl,
-              btnImageSourcePath: entry.path || el.btnImageSourcePath,
+              btnImageSourcePath: sourcePath || '',
             }
           } else {
             pg.elements[unresEl.elIdx] = {
               ...el,
               file: fileUrl,
-              mediaSourcePath: entry.path || el.mediaSourcePath,
+              mediaSourcePath: sourcePath || '',
+              mediaName: name || el.mediaName || unresEl.filename || '',
+              mediaKind: kind || el.mediaKind || detectKind(name || unresEl.filename || ''),
             }
           }
+        } else {
+          failed.push(unresEl)
         }
-      } catch { /* skip this file */ }
+      } catch { failed.push(unresEl) }
       setApplyProgress(Math.round(((i + 1) / total) * 100))
     }
 
-    onApply(updatedPages)
+    onApply(updatedPages, [...unmatched, ...failed])
   }
 
   const hasMismatch = unmatched.length > 0
@@ -142,7 +258,7 @@ export default function MediaResolveDialog({ state, desktopApi, onApply, onDismi
           <span className="media-resolver-icon">🔍</span>
           <div>
             <div className="media-resolver-title">Resolve Missing Media</div>
-            <div className="media-resolver-sub">{unresolvedEls.length} file{unresolvedEls.length !== 1 ? 's' : ''} referenced in .SCA but not found — locate the artwork folder</div>
+            <div className="media-resolver-sub">{actionableUnresolvedEls.length} file{actionableUnresolvedEls.length !== 1 ? 's' : ''} referenced in .mme but not found — locate the artwork folder</div>
           </div>
           <button className="media-resolver-close" onClick={onDismiss} title="Dismiss (media will appear as placeholders)">✕</button>
         </div>

@@ -21,8 +21,8 @@ const { spawn } = require('child_process')
 const { app, ipcMain, BrowserWindow } = require('electron')
 
 // ── Voice catalog ──────────────────────────────────────────────────────────
-// Each entry: { id, label, language, quality, modelUrl, modelSize, configUrl }
-// All URLs point to the official Hugging Face rhasspy/piper-voices repository.
+// Each entry: { id, label, language, quality, license, commercialUse, modelUrl, modelSize, configUrl }
+// All URLs point to the official Hugging Face rhasspy/piper-voices repository (MIT license).
 
 const HF_BASE = 'https://huggingface.co/rhasspy/piper-voices/resolve/main'
 
@@ -32,15 +32,30 @@ const VOICE_CATALOG = [
     label: 'Lessac (en-US, Medium)',
     language: 'en-US',
     quality: 'medium',
+    license: 'MIT',
+    commercialUse: true,
     modelUrl: `${HF_BASE}/en/en_US/lessac/medium/en_US-lessac-medium.onnx`,
     configUrl: `${HF_BASE}/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json`,
     modelSize: 63,
+  },
+  {
+    id: 'en_US-lessac-high',
+    label: 'Lessac (en-US, High)',
+    language: 'en-US',
+    quality: 'high',
+    license: 'MIT',
+    commercialUse: true,
+    modelUrl: `${HF_BASE}/en/en_US/lessac/high/en_US-lessac-high.onnx`,
+    configUrl: `${HF_BASE}/en/en_US/lessac/high/en_US-lessac-high.onnx.json`,
+    modelSize: 114,
   },
   {
     id: 'en_US-ryan-high',
     label: 'Ryan (en-US, High)',
     language: 'en-US',
     quality: 'high',
+    license: 'MIT',
+    commercialUse: true,
     modelUrl: `${HF_BASE}/en/en_US/ryan/high/en_US-ryan-high.onnx`,
     configUrl: `${HF_BASE}/en/en_US/ryan/high/en_US-ryan-high.onnx.json`,
     modelSize: 80,
@@ -50,6 +65,8 @@ const VOICE_CATALOG = [
     label: 'Amy (en-US, Medium)',
     language: 'en-US',
     quality: 'medium',
+    license: 'MIT',
+    commercialUse: true,
     modelUrl: `${HF_BASE}/en/en_US/amy/medium/en_US-amy-medium.onnx`,
     configUrl: `${HF_BASE}/en/en_US/amy/medium/en_US-amy-medium.onnx.json`,
     modelSize: 63,
@@ -59,6 +76,8 @@ const VOICE_CATALOG = [
     label: 'Cori (en-GB, Medium)',
     language: 'en-GB',
     quality: 'medium',
+    license: 'MIT',
+    commercialUse: true,
     modelUrl: `${HF_BASE}/en/en_GB/cori/medium/en_GB-cori-medium.onnx`,
     configUrl: `${HF_BASE}/en/en_GB/cori/medium/en_GB-cori-medium.onnx.json`,
     modelSize: 60,
@@ -68,6 +87,8 @@ const VOICE_CATALOG = [
     label: 'HFC Female (en-US, Medium)',
     language: 'en-US',
     quality: 'medium',
+    license: 'MIT',
+    commercialUse: true,
     modelUrl: `${HF_BASE}/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx`,
     configUrl: `${HF_BASE}/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx.json`,
     modelSize: 62,
@@ -77,6 +98,8 @@ const VOICE_CATALOG = [
     label: 'HFC Male (en-US, Medium)',
     language: 'en-US',
     quality: 'medium',
+    license: 'MIT',
+    commercialUse: true,
     modelUrl: `${HF_BASE}/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx`,
     configUrl: `${HF_BASE}/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx.json`,
     modelSize: 62,
@@ -299,7 +322,7 @@ function registerPiperIPC() {
 
   // Synthesize text → WAV file path
   ipcMain.handle('tts:piper-synthesize', async (_event, payload) => {
-    const { text, voiceId, outputPath: customOutput, rate } = payload || {}
+    const { text, voiceId, outputPath: customOutput, outputName, rate } = payload || {}
     if (!text) return { ok: false, error: 'No text provided' }
     if (!voiceId) return { ok: false, error: 'No voiceId provided' }
 
@@ -307,7 +330,14 @@ function registerPiperIPC() {
     if (!isVoiceReady(voiceId)) return { ok: false, error: `Voice "${voiceId}" not downloaded` }
 
     const modelPath = getVoiceModelPath(voiceId)
-    const outFile = customOutput || path.join(app.getPath('temp'), `piper_${Date.now()}.wav`)
+    const safeName = outputName
+      ? String(outputName)
+          .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 120)
+      : ''
+    const outFile = customOutput || path.join(app.getPath('temp'), safeName || `piper_${Date.now()}.wav`)
     await fs.mkdir(path.dirname(outFile), { recursive: true })
 
     const piperExe = getPiperExe()

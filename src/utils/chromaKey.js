@@ -1,3 +1,5 @@
+// @ts-check
+
 /**
  * chromaKey.js — Canvas-based chroma-key (colour transparency) processor.
  *

@@ -9,19 +9,23 @@ Use this checklist for item-by-item testing after each upgrade/fix.
 3. Mark `PASS` or `FAIL`.
 4. If failed, add a short note with repro steps.
 
+## Automated Smoke Checks
+
+- [ ] `npm run smoke:publish-toggles` — verifies exported player runtime includes narration/lyrics toggle handlers and state UI hooks.
+
 ---
 
 ## File Commands (10)
 
 - [ ] `file-new` — New script resets pages, selection, filename, mode, and stage; when already new shows explicit no-op status.
-- [ ] `file-open` — Opens `.mme`/`.sca`; canceling shows explicit status.
+- [ ] `file-open` — Opens `.mme`; canceling shows explicit status.
 - [ ] `file-save` — Saves current project; canceling shows explicit status.
 - [ ] `file-export-html` — Exports playable HTML; if no pages exist shows explicit status.
 - [ ] `file-export-storybook` — Opens storybook password dialog.
 - [ ] `file-export-screen-png` — Exports current screen as PNG.
 - [ ] `file-export-page-png` — Exports current page canvas as PNG.
-- [ ] `file-export-script` — Exports `.sca` script file.
-- [ ] `file-import-pages` — File picker for `.mme`/`.sca`; merges pages; no pages found shows status.
+- [ ] `file-export-script` — Exports `.mme` project script file.
+- [ ] `file-import-pages` — File picker for `.mme`; merges pages; no pages found shows status.
 - [ ] `file-import-pdf` — File picker for PDF; imports pages as storybook.
 - [ ] `file-print` — Opens print dialog.
 

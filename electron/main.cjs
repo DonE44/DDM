@@ -346,6 +346,11 @@ if (protocol) {
 if (app) {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
   app.commandLine.appendSwitch('disable-gpu-sandbox')
+  if (process.platform === 'win32') {
+    // Prevent noisy DirectComposition overlay probe errors on some Windows GPU drivers.
+    app.commandLine.appendSwitch('disable-direct-composition')
+    app.commandLine.appendSwitch('disable-features', 'DirectComposition')
+  }
 }
 
 if (IS_DEV && app) {
@@ -408,6 +413,23 @@ function createWindow() {
     },
   })
 
+  const showMainWindow = (reason) => {
+    if (win.isDestroyed()) return
+    _diagWrite(`WINDOW_SHOW reason=${reason} visible=${win.isVisible()} minimized=${win.isMinimized()} bounds=${JSON.stringify(win.getBounds())}`)
+    if (!START_KIOSK) {
+      win.setBounds({ x: 80, y: 80, width: 1600, height: 980 })
+      win.center()
+    }
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  }
+
+  win.once('ready-to-show', () => showMainWindow('ready-to-show'))
+  win.webContents.once('did-finish-load', () => showMainWindow('did-finish-load'))
+  win.webContents.on('dom-ready', () => _diagWrite('DOM_READY url=' + win.webContents.getURL()))
+  win.webContents.on('did-start-loading', () => _diagWrite('DID_START_LOADING url=' + win.webContents.getURL()))
+
   if (IS_DEV && (process.env.FLUXAURA_STUDIO_DEV_URL || process.env.SMME_DEV_URL)) {
     win.loadURL(DEV_SERVER_URL)
   } else {
@@ -422,6 +444,8 @@ function createWindow() {
     applyKioskGuard(win)
     setKioskMode(win, true)
   }
+
+  setTimeout(() => showMainWindow('fallback-timeout'), 3000)
 
   return win
 }
@@ -561,15 +585,14 @@ if (app) {
   })
 }
 
-// Expose the local HTTP media server port to the renderer process
+// Expose the local HTTP media server port to the renderer process early so
+// preload can read it synchronously before React code starts.
 if (ipcMain) {
   ipcMain.handle('media:get-server-port', () => _mediaServerPort)
-
-  // Synchronous version used by the preload to make the port available
-  // before any React code runs, eliminating the async race condition.
   ipcMain.on('media:get-server-port-sync', (event) => {
     event.returnValue = _mediaServerPort
   })
+}
 
 ipcMain.handle('dialog:open-sca', async () => {
   const result = await dialog.showOpenDialog({
@@ -597,7 +620,8 @@ ipcMain.handle('dialog:open-sca', async () => {
 
 ipcMain.handle('dialog:save-sca', async (_event, payload) => {
   const defaultName = payload?.defaultName || 'script.mme'
-  const text = payload?.text || ''
+  let text = payload?.text || ''
+  const projectAssetPaths = Array.isArray(payload?.projectAssetPaths) ? payload.projectAssetPaths : []
 
   const result = await dialog.showSaveDialog({
     title: 'Save MME Script',
@@ -609,11 +633,55 @@ ipcMain.handle('dialog:save-sca', async (_event, payload) => {
     return { canceled: true }
   }
 
+  const replacements = []
+  if (projectAssetPaths.length > 0) {
+    const projectBase = path.basename(result.filePath, path.extname(result.filePath)) || 'project'
+    const assetDir = path.join(path.dirname(result.filePath), `${projectBase}_assets`, 'media')
+    await fsp.mkdir(assetDir, { recursive: true })
+
+    const usedNames = new Set()
+    for (const srcRaw of projectAssetPaths) {
+      const src = String(srcRaw || '')
+      if (!src) continue
+      try {
+        const stat = await fsp.stat(src)
+        if (!stat.isFile()) continue
+        const parsed = path.parse(src)
+        const safeBase = (parsed.name || 'media')
+          .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 80) || 'media'
+        const ext = parsed.ext || ''
+        let fileName = `${safeBase}${ext}`
+        let n = 2
+        while (usedNames.has(fileName.toLowerCase())) {
+          fileName = `${safeBase}-${n}${ext}`
+          n += 1
+        }
+        usedNames.add(fileName.toLowerCase())
+        const dest = path.join(assetDir, fileName)
+        if (path.resolve(src) !== path.resolve(dest)) {
+          await fsp.copyFile(src, dest)
+        }
+        replacements.push({ from: src, to: dest })
+      } catch {
+        // Leave the original path in the script; the resolver can still help on reopen.
+      }
+    }
+  }
+
+  for (const { from, to } of replacements) {
+    text = text.split(from).join(to)
+    text = text.split(from.replace(/\\/g, '\\\\')).join(to.replace(/\\/g, '\\\\'))
+  }
+
   await fsp.writeFile(result.filePath, text, 'utf8')
   return {
     canceled: false,
     filePath: result.filePath,
     fileName: path.basename(result.filePath),
+    assetCopies: replacements,
   }
 })
 
@@ -718,6 +786,18 @@ ipcMain.handle('media:read-data-url', async (_event, payload) => {
       ok: false,
       reason: String(error?.message || error || 'Unknown media read error'),
     }
+  }
+})
+
+ipcMain.handle('media:exists', async (_event, payload = {}) => {
+  try {
+    const filePath = String(payload.filePath || '')
+    if (!filePath) return { ok: true, exists: false, reason: 'No file path supplied' }
+    if (/^(data:|blob:|app-media:|https?:)/i.test(filePath)) return { ok: true, exists: true, size: 0 }
+    const stat = await fs.promises.stat(filePath).catch(() => null)
+    return { ok: true, exists: !!stat && stat.isFile(), size: stat?.size || 0 }
+  } catch (err) {
+    return { ok: false, exists: false, reason: err?.message || String(err) }
   }
 })
 
@@ -891,7 +971,9 @@ ipcMain.handle('export:save-file', async (_evt, { base64, defaultName, filters, 
       if (canceled || !fp) return { ok: false, canceled: true }
       filePath = fp
     }
+    await fsp.mkdir(path.dirname(filePath), { recursive: true })
     await fsp.writeFile(filePath, Buffer.from(base64, 'base64'))
+    await fsp.access(filePath)
     return { ok: true, filePath, fileName: path.basename(filePath) }
   } catch (err) {
     return { ok: false, error: String(err.message || err) }
@@ -902,7 +984,8 @@ ipcMain.handle('export:save-file', async (_evt, { base64, defaultName, filters, 
 // Media extensions for background filtering
 const BG_IMAGE_EXTS = new Set(['jpg','jpeg','png','webp','avif','gif','bmp','svg','tif','tiff'])
 const BG_VIDEO_EXTS = new Set(['mp4','m4v','webm','mov','avi','mkv','wmv','mpeg','mpg'])
-const BG_MEDIA_EXTS = new Set([...BG_IMAGE_EXTS, ...BG_VIDEO_EXTS])
+const BG_AUDIO_EXTS = new Set(['mp3','wav','ogg','flac','aac','m4a','opus','mid','midi','wma','aif','aiff'])
+const BG_MEDIA_EXTS = new Set([...BG_IMAGE_EXTS, ...BG_VIDEO_EXTS, ...BG_AUDIO_EXTS])
 
 async function listFilesRecursive(dir, depth, maxDepth, mediaOnly = true, errors = []) {
   const entries = []
@@ -1019,7 +1102,6 @@ ipcMain.handle('mme:restore-autosave', async () => {
     return { ok: false, reason: 'no-autosave' }
   }
 })
-}
 
 // Renderer process error logging
 ipcMain.on('renderer:log-error', (_event, payload = {}) => {

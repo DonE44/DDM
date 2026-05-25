@@ -23,7 +23,8 @@ const RULER_H  = 20
 const WAVE_H   = 44
 const BLOCK_H  = 56
 const AUDIO_H  = 44
-const TOTAL_H  = RULER_H + BLOCK_H + AUDIO_H + 8
+const PAGE_AUDIO_H = 24
+const TOTAL_H  = RULER_H + BLOCK_H + PAGE_AUDIO_H * 2 + AUDIO_H + 8
 
 const MIN_ZOOM =  6
 const MAX_ZOOM = 300
@@ -60,27 +61,159 @@ const WIPE_ABBR = {
 }
 function wipeAbbr(w) { return WIPE_ABBR[w] || (w ? w.slice(0, 3) : '—') }
 
+function pageAudioKey(pageIdx, field) {
+  return `${pageIdx}:${field}`
+}
+
+function pageAudioClipKey(pageIdx, clip, clipIdx) {
+  return `${pageIdx}:clip:${clip.id || clipIdx}`
+}
+
+function pageMediaKey(pageIdx, el, elIdx) {
+  return `${pageIdx}:media:${el.id || elIdx}`
+}
+
+function isAudioElement(el) {
+  return !!el?.file && (el.mediaKind === 'audio' || /\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi)(\?|#|$)/i.test(String(el.file || el.mediaName || '')))
+}
+
+function isPlayableTimedMedia(el) {
+  if (!el?.file || el.visible === false) return false
+  if (el.pageAudioLane || el.pageAudioRole === 'background-sound' || el.isPageBackgroundSound) return false
+  const name = String(el.file || el.mediaName || '')
+  return (
+    el.mediaKind === 'audio' ||
+    el.mediaKind === 'video' ||
+    /\.(mp3|wav|ogg|flac|aac|m4a|wma|mid|midi|mp4|webm|mov|m4v|avi|ogv)(\?|#|$)/i.test(name)
+  )
+}
+
+function pageAudioClipsForLane(pg, lane) {
+  const elementClips = Array.isArray(pg?.elements)
+    ? pg.elements
+        .map((el) => ({
+          ...el,
+          elementId: el.id,
+          lane: Number(el.pageAudioLane) || lane,
+          name: el.mediaName || el.elLabel || `Page Audio ${lane}`,
+          offset: Number(el.pageAudioOffset ?? el.mediaStartTime) || 0,
+        }))
+        .filter((clip) => clip.visible !== false && Number(clip.pageAudioLane || 0) === lane && isAudioElement(clip))
+    : []
+  const clips = Array.isArray(pg?.pageAudioClips)
+    ? pg.pageAudioClips
+        .map((clip, clipIdx) => ({ ...clip, clipIdx }))
+        .filter((clip) => Number(clip.lane || 1) === lane && clip.file)
+    : []
+  const legacyField = lane === 2 ? 'narration2' : 'narration'
+  const legacy = pg?.[legacyField]?.file
+    ? [{ ...(pg[legacyField] || {}), id: `legacy-${legacyField}`, clipIdx: -1, legacyField, lane }]
+    : []
+  return [...elementClips, ...clips, ...legacy]
+}
+
+function pageAudioExtent(pg, pageIdx, durations) {
+  const clips = [1, 2].flatMap((lane) => pageAudioClipsForLane(pg, lane))
+  return clips.reduce((maxEnd, track) => {
+    const key = track.legacyField
+      ? pageAudioKey(pageIdx, track.legacyField)
+      : pageAudioClipKey(pageIdx, track, track.clipIdx)
+    const dur = durations[key] || track.duration || 0
+    const offset = Number(track.offset) || 0
+    return Math.max(maxEnd, offset + Math.max(0, dur))
+  }, 0)
+}
+
+function pagePlayableMediaExtent(pg, pageIdx, durations) {
+  if (!Array.isArray(pg?.elements)) return 0
+  return pg.elements.reduce((maxEnd, el) => {
+    if (!isPlayableTimedMedia(el)) return maxEnd
+    const key = pageMediaKey(pageIdx, el, -1)
+    const dur = durations[key] || el.duration || el.mediaDuration || 0
+    const offset = Number(el.mediaStartTime ?? el.startTime ?? el.delay ?? 0) || 0
+    return Math.max(maxEnd, offset + Math.max(0, dur))
+  }, 0)
+}
+
+function pageWaitExtent(pg, pageIdx, durations) {
+  return Math.max(
+    pageAudioExtent(pg, pageIdx, durations),
+    pagePlayableMediaExtent(pg, pageIdx, durations),
+  )
+}
+
+function finiteNumber(value) {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : null
+}
+
+function isWaitForMediaMode(mode) {
+  return mode === 'wait' || mode === 'media'
+}
+
+function timingPatchFromSeconds(seconds) {
+  const duration = Math.max(0, Math.round((Number(seconds) || 0) * 1000) / 1000)
+  return {
+    duration,
+    durationMs: Math.round(duration * 1000),
+    ms: 0,
+  }
+}
+
 // ── Compute page layout ────────────────────────────────────────────────────────
 /**
  * Returns [{start, end, width, left, pageIdx}] for every page.
  * In lyric mode: start = lyricStart, end = lyricEnd.
  * In regular mode: start = cumulative sum of prior durations, end = start + duration.
  */
-function computeLayout(pages, zoom) {
+function computeLayout(pages, zoom, pageAudioDurations = {}) {
   const isLyric = pages.some(pg => pg.lyricStart != null)
   let cursor = 0
   return pages.map((pg, i) => {
     let start, end
     if (isLyric) {
-      start = pg.lyricStart ?? cursor
-      end   = pg.lyricEnd   ?? (start + 4)
+      const rawStart = finiteNumber(pg.lyricStart)
+      const rawEnd = finiteNumber(pg.lyricEnd)
+      const timingMode = pg.timing?.mode || 'wait'
+      const fallbackDur = Number(pg.timing?.duration) || 0
+      const pageAudioDur = pageAudioExtent(pg, i, pageAudioDurations)
+      const mediaDur = pageWaitExtent(pg, i, pageAudioDurations)
+
+      start = rawStart ?? cursor
+      if (i > 0 && start < cursor - 0.05) start = cursor
+
+      const baseDur = rawEnd != null && rawEnd > start
+        ? rawEnd - start
+        : Math.max(fallbackDur, 4)
+      end = start + Math.max(0.1, baseDur)
+
+      if (isWaitForMediaMode(timingMode)) {
+        const waitDur = Math.max(mediaDur, fallbackDur)
+        if (waitDur > 0) end = Math.max(end, start + waitDur)
+      } else if (timingMode === 'pause') {
+        const waitDur = Math.max(pageAudioDur, fallbackDur)
+        if (waitDur > 0) end = Math.max(end, start + waitDur)
+      } else if (timingMode === 'none' && mediaDur > 0) {
+        end = Math.max(end, start + mediaDur)
+      }
     } else {
-      const dur = pg.timing?.mode === 'pause' ? (Number(pg.timing?.duration) || 0) : 0
+      const timingMode = pg.timing?.mode || 'wait'
+      const pageAudioDur = pageAudioExtent(pg, i, pageAudioDurations)
+      const audioDur = pageWaitExtent(pg, i, pageAudioDurations)
+      const fallbackDur = Number(pg.timing?.duration) || 0
+      const dur = timingMode === 'none'
+        ? audioDur
+        : isWaitForMediaMode(timingMode)
+          ? Math.max(audioDur, fallbackDur)
+          : timingMode === 'pause'
+            ? Math.max(pageAudioDur, fallbackDur)
+            : (timingMode === 'loop' || timingMode === 'auto')
+              ? fallbackDur
+              : 0
       start = cursor
       end   = cursor + Math.max(0.1, dur)
-      cursor = end
     }
-    if (!isLyric) cursor = end
+    cursor = Math.max(cursor, end)
     return {
       start,
       end,
@@ -96,18 +229,21 @@ function computeLayout(pages, zoom) {
 
 /**
  * @param {{
- *   pages: any[],
+ *   pages: import('../types/desktop-api').SmmPage[],
  *   currentIdx: number,
- *   onPagesChange: (pages: any[]) => void,
- *   onPagesReorder?: (pages: any[]) => void,
+ *   onPagesChange: (pages: import('../types/desktop-api').SmmPage[]) => void,
+ *   onPagesReorder?: (pages: import('../types/desktop-api').SmmPage[]) => void,
  *   onPageClick: (idx: number) => void,
  *   onPageSelect?: (idx: number, e: MouseEvent) => void,
+ *   onElementSelect?: (pageIdx: number, elementId: string) => void,
  *   selectedPageIds?: number[],
  *   presentationAudio: { file:string, name?:string, trimStart?:number, trimEnd?:number|null, offset?:number, playbackRate?:number } | null,
  *   presAudioEl: HTMLAudioElement | null,
  *   onPageAdd?: () => void,
  *   onPageDelete?: () => void,
  *   onAudioChange?: (updates: object) => void,
+ *   onPreviewPageAudio?: (clip: object) => void,
+ *   onStopPageAudioPreview?: () => void,
  *   onResyncAudio?: () => void,
  * }} props
  */
@@ -118,18 +254,22 @@ export default function PresentationTimeline({
   onPagesReorder,
   onPageClick,
   onPageSelect,
+  onElementSelect,
   selectedPageIds = [],
   presentationAudio,
   presAudioEl,
   onPageAdd,
   onPageDelete,
   onAudioChange,
+  onPreviewPageAudio,
+  onStopPageAudioPreview,
   onResyncAudio,
 }){
   const [zoom, setZoom]         = useState(32)
   const [waveformPeaks, setWave]= useState(/** @type {Float32Array|null} */ (null))
   const [, setWaveErr] = useState(false)
   const [audioDur, setAudioDur] = useState(0)
+  const [pageAudioDurations, setPageAudioDurations] = useState({})
   const [hovIdx, setHovIdx]     = useState(-1)
 
   const containerRef  = useRef(/** @type {HTMLDivElement|null} */ (null))
@@ -140,19 +280,63 @@ export default function PresentationTimeline({
 
   const dragRef          = useRef(/** @type {any|null} */ (null))
   const audioEditRef     = useRef(/** @type {any|null} */ (null))
+  const pageAudioEditRef = useRef(/** @type {any|null} */ (null))
   const onChangeRef      = useRef(onPagesChange)
   const onAudioChangeRef = useRef(onAudioChange)
   const presAudioStateRef= useRef(presentationAudio)
   const audioDurRef      = useRef(0)
+  const pageAudioDurationsRef = useRef(pageAudioDurations)
   useEffect(() => { onChangeRef.current = onPagesChange }, [onPagesChange])
   useEffect(() => { onAudioChangeRef.current = onAudioChange }, [onAudioChange])
   useEffect(() => { presAudioStateRef.current = presentationAudio }, [presentationAudio])
+  useEffect(() => { pageAudioDurationsRef.current = pageAudioDurations }, [pageAudioDurations])
   const onReorderRef = useRef(onPagesReorder)
   useEffect(() => { onReorderRef.current = onPagesReorder }, [onPagesReorder])
   const zoomRef = useRef(zoom)
   useEffect(() => { zoomRef.current = zoom }, [zoom])
   const pagesRef = useRef(pages)
   useEffect(() => { pagesRef.current = pages }, [pages])
+
+  useEffect(() => {
+    let cancelled = false
+    const entries = []
+    pages.forEach((pg, pi) => {
+      ;['narration', 'narration2'].forEach((field) => {
+        const track = pg?.[field]
+        if (track?.file) entries.push({ key: pageAudioKey(pi, field), url: track.file })
+      })
+      ;(pg?.pageAudioClips || []).forEach((clip, clipIdx) => {
+        if (clip?.file) entries.push({ key: pageAudioClipKey(pi, clip, clipIdx), url: clip.file })
+      })
+      ;(pg?.elements || []).forEach((el) => {
+        if (el?.visible !== false && el?.pageAudioLane && isAudioElement(el)) {
+          entries.push({ key: pageAudioClipKey(pi, { id: el.id }, -1), url: el.file })
+        } else if (isPlayableTimedMedia(el)) {
+          entries.push({ key: pageMediaKey(pi, el, -1), url: el.file })
+        }
+      })
+    })
+    if (!entries.length) {
+      setPageAudioDurations({})
+      return
+    }
+    const next = {}
+    let remaining = entries.length
+    entries.forEach(({ key, url }) => {
+      const audio = new Audio(url)
+      audio.preload = 'metadata'
+      const done = () => {
+        if (!cancelled && Number.isFinite(audio.duration) && audio.duration > 0) {
+          next[key] = audio.duration
+        }
+        remaining -= 1
+        if (!cancelled && remaining <= 0) setPageAudioDurations(next)
+      }
+      audio.addEventListener('loadedmetadata', done, { once: true })
+      audio.addEventListener('error', done, { once: true })
+    })
+    return () => { cancelled = true }
+  }, [pages])
 
   const [tlDragOverIdx, setTlDragOverIdx] = useState(-1)
   const selectedPageIdsRef = useRef(selectedPageIds)
@@ -338,6 +522,27 @@ export default function PresentationTimeline({
     }
   }, [])
 
+  const startPageAudioDrag = useCallback((e, pageIdx, clip, currentLane, pageStart, pageDur, trackDur) => {
+    e.preventDefault(); e.stopPropagation()
+    onPageClick(pageIdx)
+    if (clip.elementId && onElementSelect) onElementSelect(pageIdx, clip.elementId)
+    pageAudioEditRef.current = {
+      pageIdx,
+      clipId: clip.id || '',
+      clipIdx: clip.clipIdx,
+      elementId: clip.elementId || '',
+      legacyField: clip.legacyField || '',
+      startX: e.clientX,
+      startY: e.clientY,
+      origOffset: Number(clip.offset) || 0,
+      origLane: Number(currentLane) || 1,
+      pageStart: Number(pageStart) || 0,
+      pageDur: Math.max(0.1, Number(pageDur) || 0.1),
+      trackDur: Math.max(0.1, Number(trackDur) || 0.1),
+      zoom: zoomRef.current,
+    }
+  }, [onElementSelect, onPageClick])
+
   const onMouseMove = useCallback((e) => {
     const drag = dragRef.current
     if (drag) {
@@ -364,10 +569,12 @@ export default function PresentationTimeline({
         }
       } else {
         if (type === 'resize') {
-          const newDur = Math.max(MIN_DUR, origDur + dt)
+          const pg = origPages[pageIdx]
+          const audioMin = pageAudioExtent(pg, pageIdx, pageAudioDurationsRef.current)
+          const newDur = Math.max(MIN_DUR, audioMin, origDur + dt)
           newPages = origPages.map((pg, i) => i !== pageIdx ? pg : {
             ...pg,
-            timing: { ...(pg.timing || {}), mode: 'pause', duration: Math.round(newDur * 10) / 10 },
+            timing: { ...(pg.timing || {}), mode: 'pause', ...timingPatchFromSeconds(newDur) },
           })
         } else {
           return
@@ -380,6 +587,57 @@ export default function PresentationTimeline({
       drag.origEnd   = updated.lyricEnd   ?? origEnd
       drag.origDur   = updated.timing?.duration ?? origDur
       drag.startX    = e.clientX
+      return
+    }
+
+    const pageAudioDrag = pageAudioEditRef.current
+    if (pageAudioDrag) {
+      const dt = (e.clientX - pageAudioDrag.startX) / pageAudioDrag.zoom
+      const nextOffset = Math.max(0, Math.round((pageAudioDrag.origOffset + dt) * 100) / 100)
+      const laneDelta = Math.round((e.clientY - pageAudioDrag.startY) / PAGE_AUDIO_H)
+      const nextLane = Math.max(1, Math.min(2, pageAudioDrag.origLane + laneDelta))
+      const { pageIdx, clipId, clipIdx, elementId, legacyField } = pageAudioDrag
+      const newPages = pagesRef.current.map((pg, i) => {
+        if (i !== pageIdx) return pg
+        const nextEnd = nextOffset + (Number(pageAudioDrag.trackDur) || 0)
+        const currentDuration = Number(pg.timing?.durationMs) > 0
+          ? Number(pg.timing.durationMs) / 1000
+          : Number(pg.timing?.duration) || 0
+        const nextDuration = pg.timing?.mode === 'pause'
+          ? Math.max(currentDuration, nextEnd)
+          : currentDuration
+        const nextTiming = pg.timing?.mode === 'pause'
+          ? { ...(pg.timing || {}), ...timingPatchFromSeconds(nextDuration) }
+          : (pg.timing || {})
+        if (legacyField) {
+          const nextField = nextLane === 2 ? 'narration2' : 'narration'
+          if (nextField === legacyField) return { ...pg, timing: nextTiming, [legacyField]: { ...(pg[legacyField] || {}), offset: nextOffset } }
+          return {
+            ...pg,
+            timing: nextTiming,
+            [legacyField]: { ...(pg[legacyField] || {}), file: '', name: '', sourcePath: '' },
+            [nextField]: { ...(pg[nextField] || {}), ...(pg[legacyField] || {}), offset: nextOffset },
+          }
+        }
+        if (elementId) {
+          return {
+            ...pg,
+            timing: nextTiming,
+            elements: (pg.elements || []).map((el) =>
+              el.id === elementId ? { ...el, pageAudioLane: nextLane, pageAudioOffset: nextOffset, mediaStartTime: nextOffset } : el,
+            ),
+          }
+        }
+        return {
+          ...pg,
+          timing: nextTiming,
+          pageAudioClips: (pg.pageAudioClips || []).map((clip, idx) =>
+            (clipId ? clip.id === clipId : idx === clipIdx) ? { ...clip, lane: nextLane, offset: nextOffset } : clip,
+          ),
+        }
+      })
+      pagesRef.current = newPages
+      onChangeRef.current(newPages)
       return
     }
 
@@ -404,7 +662,7 @@ export default function PresentationTimeline({
     }
   }, [isLyric])
 
-  const onMouseUp = useCallback(() => { dragRef.current = null; audioEditRef.current = null }, [])
+  const onMouseUp = useCallback(() => { dragRef.current = null; audioEditRef.current = null; pageAudioEditRef.current = null }, [])
 
   // Click ruler → seek audio
   const handleSeekClick = useCallback((e) => {
@@ -417,11 +675,20 @@ export default function PresentationTimeline({
   }, [presAudioEl])
 
   // ── Computed layout ────────────────────────────────────────────────────────────
-  const layout    = computeLayout(pages, zoom)
+  const layout    = computeLayout(pages, zoom, pageAudioDurations)
   const totalDur  = isLyric
     ? Math.max(audioDur, ...layout.map(l => l.end))
     : layout.reduce((acc, l) => acc + l.dur, 0)
   const totalW    = Math.max(800, Math.ceil(totalDur * zoom) + 200)
+  const activePageLeft = layout.find((item) => item.pageIdx === currentIdx)?.left ?? 0
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    requestAnimationFrame(() => {
+      container.scrollLeft = Math.max(0, activePageLeft)
+    })
+  }, [currentIdx, activePageLeft])
 
   // Tick marks every N seconds depending on zoom
   const tickStep = zoom >= 80 ? 1 : zoom >= 30 ? 5 : zoom >= 10 ? 10 : 30
@@ -470,7 +737,7 @@ export default function PresentationTimeline({
         {onResyncAudio && (
           <button
             style={{ ...SB, background: '#1a2e1a', color: '#4ade80', borderColor: '#22c55e' }}
-            title="Re-sync audio timestamps to current page text — use after editing lyrics or page text"
+            title="Re-sync page audio timing display from PAGE AUDIO 1/2 without changing page timing modes"
             onClick={onResyncAudio}
           >🔄 Re-sync Audio</button>
         )}
@@ -598,9 +865,73 @@ export default function PresentationTimeline({
             })}
           </div>
 
+          {/* ── Page audio lanes ── */}
+          {[
+            { lane: 1, label: 'PAGE AUDIO 1', color: '#22c55e' },
+            { lane: 2, label: 'PAGE AUDIO 2', color: '#14b8a6' },
+          ].map((lane) => (
+            <div key={lane.lane} style={{ height: PAGE_AUDIO_H, position: 'relative', background: '#07111a', borderBottom: '1px solid #102033' }}>
+              <span style={{ position: 'absolute', left: 4, top: 5, fontSize: 8, color: '#42606f', zIndex: 1, textTransform: 'uppercase', letterSpacing: 1 }}>{lane.label}</span>
+              {layout.map(({ start, dur: pageDur, pageIdx: pi }) => {
+                const pg = pages[pi]
+                return pageAudioClipsForLane(pg, lane.lane).map((track) => {
+                  const key = track.legacyField
+                    ? pageAudioKey(pi, track.legacyField)
+                    : pageAudioClipKey(pi, track, track.clipIdx)
+                  const dur = pageAudioDurations[key] || track.duration || 0
+                  const offset = Number(track.offset) || 0
+                  const left = Math.round((start + offset) * zoom)
+                  const width = Math.max(20, Math.round(Math.max(0.1, dur) * zoom))
+                  return (
+                    <div
+                      key={`${lane.lane}-${pg.id || pi}-${track.id || track.clipIdx}`}
+                      title={`${lane.label}\n${track.name || 'Audio'}\nPage ${pi + 1} offset: ${offset.toFixed(2)}s\nDrag horizontally within this page or vertically to move between PAGE AUDIO 1/2`}
+                      style={{
+                        position: 'absolute',
+                        left,
+                        top: 4,
+                        width,
+                        height: PAGE_AUDIO_H - 8,
+                        background: `${lane.color}33`,
+                        border: `1px solid ${lane.color}aa`,
+                        borderRadius: 3,
+                        boxSizing: 'border-box',
+                        overflow: 'hidden',
+                        cursor: 'grab',
+                      }}
+                      onMouseDown={(e) => startPageAudioDrag(e, pi, track, lane.lane, start, pageDur, dur)}
+                    >
+                      <button
+                        title="Preview this audio clip"
+                        style={{ position: 'absolute', left: 2, top: 1, width: 16, height: 16, padding: 0, fontSize: 9, lineHeight: '14px', zIndex: 3 }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onPreviewPageAudio?.(track)
+                        }}
+                      >▶</button>
+                      <button
+                        title="Stop audio preview"
+                        style={{ position: 'absolute', left: 20, top: 1, width: 16, height: 16, padding: 0, fontSize: 9, lineHeight: '14px', zIndex: 3 }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onStopPageAudioPreview?.()
+                        }}
+                      >■</button>
+                      <span style={{ position: 'absolute', left: 40, right: 6, top: 1, fontSize: 9, color: '#d1fae5', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none' }}>
+                        🎙 {track.name || lane.label}{dur ? ` · ${fmtDur(dur)}` : ''}
+                      </span>
+                    </div>
+                  )
+                })
+              })}
+            </div>
+          ))}
+
           {/* ── Audio lane ── */}
           <div style={{ height: AUDIO_H, position: 'relative', background: '#060b14' }}>
-            <span style={{ position: 'absolute', left: 4, top: 2, fontSize: 8, color: '#374151', zIndex: 1, textTransform: 'uppercase', letterSpacing: 1 }}>Audio</span>
+            <span style={{ position: 'absolute', left: 4, top: 2, fontSize: 8, color: '#374151', zIndex: 1, textTransform: 'uppercase', letterSpacing: 1 }}>Presentation Audio</span>
 
             {presentationAudio?.file ? (
               audioDur > 0 ? (
@@ -668,7 +999,7 @@ export default function PresentationTimeline({
               left:          0,
               top:           0,
               width:         2,
-              height:        RULER_H + BLOCK_H + AUDIO_H + 8,
+              height:        RULER_H + BLOCK_H + PAGE_AUDIO_H * 2 + AUDIO_H + 8,
               background:    '#ef4444',
               pointerEvents: 'none',
               zIndex:        30,

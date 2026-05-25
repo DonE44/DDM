@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 const repoRoot = path.resolve(__dirname, '..');
 const releaseDir = path.join(repoRoot, 'release');
@@ -18,7 +19,13 @@ function log(message) {
 
 log('[FluxAura Studio] Loading desktop dev launcher...');
 
-import('./start-desktop-dev.mjs').catch((error) => {
-  log(`[FluxAura Studio] Launcher failed before startup: ${error?.stack || error?.message || error}`);
-  process.exit(1);
-});
+const launcherUrl = pathToFileURL(path.join(__dirname, 'start-desktop-dev.mjs')).href;
+
+;(async () => {
+  try {
+    await import(launcherUrl);
+  } catch (error) {
+    log(`[FluxAura Studio] Launcher failed before startup: ${error?.stack || error?.message || error}`);
+    process.exit(1);
+  }
+})();

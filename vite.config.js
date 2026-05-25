@@ -3,6 +3,8 @@ import { defineConfig } from 'vite'
 // TEMPORARY: Disabled React plugin due to $RefreshSig$ injection error in dev mode
 // Using Vite's native JSX support instead (tsx/jsx auto-detected)
 
+const fastValidate = globalThis?.process?.env?.FLUXAURA_FAST_VALIDATE === '1'
+
 // https://vite.dev/config/
 export default defineConfig({
   // Use relative base path for Electron file:// protocol support
@@ -43,6 +45,7 @@ export default defineConfig({
     // Windows setup with exit code -1073741795. Keep production builds
     // unminified until the toolchain is upgraded or pinned to a stable minifier.
     minify: false,
+    reportCompressedSize: !fastValidate,
     // Raise the chunk-size warning threshold to 1500 kB.
     // transformers.js and onnxruntime-web are large intentional third-party
     // dependencies — splitting them further would break their internal loading.

@@ -28,11 +28,15 @@ export default function KaraokeText({
 }) {
   const containerRef = useRef(/** @type {HTMLSpanElement|null} */ (null))
   const rafRef       = useRef(/** @type {number|null} */ (null))
-  const WORD_MATCH_TOLERANCE_S = 0.05  // 50ms tolerance window for sync
+  const hasPlaybackStartedRef = useRef(false)
+  const WORD_START_TOLERANCE_S = 0.04
+  const WORD_END_TOLERANCE_S = 0.02
 
   useEffect(() => {
     const container = containerRef.current
     if (!container || !words?.length) return
+
+    hasPlaybackStartedRef.current = false
 
     const spans = /** @type {HTMLSpanElement[]} */ ([...container.querySelectorAll('[data-wi]')])
     if (!spans.length) return
@@ -40,26 +44,53 @@ export default function KaraokeText({
     let lastIdx = -2  // -2 = nothing set yet
 
     const tick = () => {
-      const t = audioRef?.current?.currentTime ?? 0
+      const audio = audioRef?.current ?? null
+      const t = audio?.currentTime ?? 0
+      const lastWord = words[words.length - 1]
+      const audioEndTime = Number.isFinite(audio?.duration) && Number(audio?.duration) > 0
+        ? Number(audio?.duration)
+        : null
+      const effectiveLastEnd = lastWord
+        ? Math.min(lastWord.end, audioEndTime != null ? audioEndTime : lastWord.end)
+        : 0
 
-      // Find active word — allow ±50ms tolerance around word boundaries for sync robustness
+      // Avoid the "first word stuck" effect while clip is still paused before delayed start.
+      if (!hasPlaybackStartedRef.current) {
+        if (audio && (!audio.paused || t > WORD_START_TOLERANCE_S)) {
+          hasPlaybackStartedRef.current = true
+        } else {
+          if (lastIdx !== -1) {
+            spans.forEach((span) => {
+              span.style.color = ''
+              span.style.textShadow = ''
+              span.style.fontWeight = ''
+              span.style.opacity = '1'
+            })
+            lastIdx = -1
+          }
+          rafRef.current = requestAnimationFrame(tick)
+          return
+        }
+      }
+
+      // Find active word with small tolerance windows around boundaries.
       let active = -1
       for (let i = 0; i < words.length; i++) {
         const w = words[i]
-        // With tolerance: match if time is within 50ms before start or 50ms after end
-        if (t >= (w.start - WORD_MATCH_TOLERANCE_S) && t < (w.end + WORD_MATCH_TOLERANCE_S)) { 
+        if (t >= (w.start - WORD_START_TOLERANCE_S) && t < (w.end + WORD_END_TOLERANCE_S)) {
           active = i
-          break 
+          break
         }
-        // Also check gap between words (happens when timing has small jitter)
-        if (i < words.length - 1 && t >= w.end && t < words[i + 1].start) { 
-          active = i
-          break 
+        // During small gaps between words, choose nearest boundary to avoid jitter.
+        if (i < words.length - 1 && t >= w.end && t < words[i + 1].start) {
+          const mid = (w.end + words[i + 1].start) / 2
+          active = t < mid ? i : i + 1
+          break
         }
       }
-      // Once audio is past last word end, keep last word lit briefly
-      if (active === -1 && words.length > 0 && t >= words[words.length - 1].start) {
-        active = words.length - 1
+      // Never leave the final token glowing after its effective spoken window.
+      if ((audio?.ended || false) && lastWord && t >= effectiveLastEnd) {
+        active = -1
       }
 
       if (active !== lastIdx) {

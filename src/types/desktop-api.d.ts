@@ -90,6 +90,15 @@ interface SmmElement {
   mediaKind?: string
   mediaSourcePath?: string
   mediaName?: string
+  mediaExt?: string
+  audioHidden?: boolean
+  showMediaControls?: boolean
+  autoPlay?: boolean
+  pageAudioLane?: 1 | 2 | number
+  pageAudioOffset?: number
+  isNarrationClip?: boolean
+  sourceTextElementId?: string
+  textPreview?: string
   // Interaction
   interactive?: boolean
   waitOnClick?: boolean
@@ -250,8 +259,31 @@ interface SmmPage {
   narration?: {
     file?: string
     name?: string
+    sourcePath?: string
     autoPlay?: boolean
+    offset?: number
   }
+  narration2?: {
+    file?: string
+    name?: string
+    sourcePath?: string
+    autoPlay?: boolean
+    offset?: number
+  }
+  pageAudioClips?: Array<{
+    id?: string
+    lane?: 1 | 2 | number
+    file?: string
+    name?: string
+    sourcePath?: string
+    autoPlay?: boolean
+    offset?: number
+    duration?: number
+    trimStart?: number
+    textElementId?: string
+    textPreview?: string
+    wordTimestamps?: Array<{ start?: number, end?: number, text?: string, word?: string }>
+  }>
   input?: {
     mouse?: boolean
     keyboard?: boolean
@@ -423,6 +455,74 @@ interface ListFolderResult {
   error?: string
 }
 
+interface ExportFileFilter {
+  name: string
+  extensions: string[]
+}
+
+interface SaveExportFilePayload {
+  base64: string
+  defaultName: string
+  filters?: ExportFileFilter[]
+  outputFolder?: string | null
+}
+
+interface SaveExportFileResult {
+  ok: boolean
+  canceled?: boolean
+  filePath?: string
+  fileName?: string
+  error?: string
+}
+
+interface ZipExportFile {
+  name: string
+  base64: string
+}
+
+interface SaveZipEncryptedPayload {
+  files: ZipExportFile[]
+  password: string
+  defaultName: string
+  filters?: ExportFileFilter[]
+  outputFolder?: string | null
+}
+
+type SaveZipEncryptedResult = SaveExportFileResult
+
+interface SystemFontEntry {
+  name: string
+  path: string
+  file: string
+}
+
+interface ListSystemFontsResult {
+  ok: boolean
+  fonts: SystemFontEntry[]
+  error?: string
+}
+
+interface LyricExportFrame {
+  imageBase64: string
+  durationSec: number
+}
+
+interface LyricExportAudioClip {
+  path: string
+  startSec: number
+}
+
+interface LyricExportEncodePayload {
+  tmpId: string
+  totalFrames: number
+  audioSourcePath?: string | null
+  audioClips?: LyricExportAudioClip[] | null
+  outputPath?: string
+  width?: number
+  height?: number
+  crf?: number
+}
+
 /** Progress event from whisper.onProgress */
 interface WhisperProgressEvent {
   type?: string
@@ -439,8 +539,29 @@ interface WhisperResult {
   language?: string
   chunks?: unknown[]
   wordTimestamps?: unknown[]
+  engine?: string
+  method?: string | null
+  model?: string | null
+  modelPath?: string | null
+  warnings?: string[]
+  gaps?: unknown[]
+  containsGasoline?: boolean
+  containsFingers?: boolean
+  containsMatch?: boolean
   ok?: boolean
   error?: string
+}
+
+interface WhisperEngineStatusResult {
+  defaultEngine?: string
+  availableEngines?: Array<{
+    id: string
+    label?: string
+    available?: boolean
+    executablePath?: string | null
+    modelCandidates?: string[]
+    searchRoots?: string[]
+  }>
 }
 
 /** Local Whisper model cache status */
@@ -460,14 +581,38 @@ interface WhisperClearModelResult {
   error?: string
 }
 
+/** HuggingFace token status returned by legacy token IPC */
+interface HFTokenStatusResult {
+  hasToken: boolean
+  isValid: boolean
+  username?: string
+  error?: string
+}
+
+/** HuggingFace token validation result returned by legacy token IPC */
+interface HFSetTokenResult {
+  valid: boolean
+  username?: string
+  error?: string
+}
+
+/** HuggingFace token clear result returned by legacy token IPC */
+interface HFClearTokenResult {
+  success?: boolean
+  ok?: boolean
+  error?: string
+}
+
 // ── smmDesktop API surface ───────────────────────────────────────────────────
 
 interface SmmDesktopApi {
   /**
-   * Generic IPC invoke — used by Whisper/AI panels for channels not yet in the
-   * typed surface (e.g. 'whisper:getTokenStatus', 'whisper:setHFToken').
-   * Add a typed overload when a channel is fully stabilised.
+   * Legacy IPC invoke bridge. Keep this narrow: expose only channels that are
+   * explicitly whitelisted in electron/preload.cjs.
    */
+  invoke(channel: 'whisper:getTokenStatus'): Promise<HFTokenStatusResult>
+  invoke(channel: 'whisper:setHFToken', token: string): Promise<HFSetTokenResult>
+  invoke(channel: 'whisper:clearHFToken'): Promise<HFClearTokenResult>
   invoke(channel: string, ...args: unknown[]): Promise<unknown>
   /** Show OS open-file dialog for .mme files */
   openMme(): Promise<OpenMmeResult>
@@ -477,6 +622,8 @@ interface SmmDesktopApi {
   selectMedia(payload?: { category?: string; title?: string }): Promise<SelectMediaResult>
   /** Read a media file and return it as a data URL (images / audio) */
   readMediaDataUrl(payload: { filePath: string; category?: string }): Promise<ReadMediaDataUrlResult>
+  /** Lightweight existence check for native media paths */
+  mediaExists(payload: { filePath: string }): Promise<{ ok: boolean; exists: boolean; size?: number; reason?: string }>
   /** Transcode a media file via ffmpeg */
   transcodeMedia(payload: {
     inputPath?: string
@@ -511,12 +658,18 @@ interface SmmDesktopApi {
   getMediaServerPort(): Promise<number>
   /** Show OS folder picker */
   selectFolder(): Promise<{ canceled: boolean; folderPath?: string }>
+  /** Save exported HTML / MMP / ZIP data through the native desktop path */
+  saveExportFile(payload: SaveExportFilePayload): Promise<SaveExportFileResult>
+  /** Save an encrypted ZIP bundle through the native desktop path */
+  saveZipEncrypted(payload: SaveZipEncryptedPayload): Promise<SaveZipEncryptedResult>
   /** Capture the current page as a PNG */
   capturePage(opts?: { quality?: number; title?: string; defaultName?: string }): Promise<CapturePageResult>
   /** Save a PNG data URL to a user-chosen file */
   savePng(dataUrl: string, opts?: { defaultName?: string; title?: string }): Promise<CapturePageResult>
   /** List all files in a folder recursively (up to depth 3) */
   listFolderFiles(payload: { folderPath: string; mediaOnly?: boolean }): Promise<ListFolderResult>
+  /** List installed system fonts for @font-face injection */
+  listSystemFonts(): Promise<ListSystemFontsResult>
   /** Read a text file from disk */
   readTextFile(filePath: string): Promise<string>
   /** Write current MME text to persistent dev auto-save location */
@@ -528,21 +681,28 @@ interface SmmDesktopApi {
   /** Offline translation API */
   translate: {
     translate(payload: { texts: string[]; srcLang?: string; tgtLang?: string }): Promise<{ ok: boolean; texts?: string[]; error?: string }>
+    cancel(): Promise<{ ok: boolean; error?: string }>
+    modelStatus(): Promise<{ ok: boolean; status?: string; modelId?: string; error?: string }>
     onProgress(handler: (data: unknown) => void): () => void
   }
   /** Lyric video export API (electron/lyric-export.cjs) */
   lyricExport: {
     saveDialog(opts?: { defaultName?: string }): Promise<{ canceled: boolean; outputPath?: string }>
     exportVideo(payload: { frames: unknown[]; audioSourcePath: string; outputPath?: string; width?: number; height?: number }): Promise<{ ok: boolean; outputPath?: string; error?: string }>
+    exportInit(): Promise<{ tmpId: string }>
+    pushBatch(payload: { tmpId: string; batch: LyricExportFrame[]; startIndex: number }): Promise<{ ok: boolean; error?: string }>
+    encode(payload: LyricExportEncodePayload): Promise<{ ok: boolean; outputPath?: string; error?: string }>
     onProgress(handler: (data: { progress?: number; status?: string }) => void): () => void
   }
   /** Whisper speech-to-text API (electron/whisper-transcribe.cjs) */
   whisper: {
     transcribe(payload: unknown): Promise<WhisperResult>
-    setHFToken(payload: unknown): Promise<unknown>
+    setHFToken(payload: { token: string }): Promise<{ ok: boolean; error?: string }>
     cancel(): Promise<unknown>
     modelStatus(payload: { modelId: string }): Promise<WhisperModelStatusResult>
     clearModel(payload: { modelId: string }): Promise<WhisperClearModelResult>
+    engineStatus(): Promise<WhisperEngineStatusResult>
+    exportDebug(payload: { request?: unknown; output?: unknown }): Promise<{ ok: boolean; filePath?: string; error?: string }>
     onProgress(handler: (data: WhisperProgressEvent) => void): () => void
   }
   /** Piper TTS API (electron/piper-tts.cjs) */
@@ -550,6 +710,7 @@ interface SmmDesktopApi {
     voicesCatalog(): Promise<unknown[]>
     voiceStatus(voiceId: string): Promise<unknown>
     downloadVoice(voiceId: string): Promise<{ ok: boolean; error?: string }>
+    installBinary(): Promise<{ ok: boolean; alreadyInstalled?: boolean; error?: string }>
     synthesize(payload: { text: string; voiceId: string; rate?: number }): Promise<{ ok: boolean; path?: string; error?: string }>
     listCached(): Promise<unknown[]>
     onDownloadProgress(handler: (data: { stage?: string; percent?: number; detail?: string }) => void): () => void
@@ -615,7 +776,21 @@ export type {
   RestoreAutoSaveResult,
   ListFolderResult,
   ListFolderFileEntry,
+  ExportFileFilter,
+  SaveExportFilePayload,
+  SaveExportFileResult,
+  ZipExportFile,
+  SaveZipEncryptedPayload,
+  SaveZipEncryptedResult,
+  SystemFontEntry,
+  ListSystemFontsResult,
+  LyricExportFrame,
+  LyricExportAudioClip,
+  LyricExportEncodePayload,
   WhisperResult,
   WhisperModelStatusResult,
   WhisperClearModelResult,
+  HFTokenStatusResult,
+  HFSetTokenResult,
+  HFClearTokenResult,
 }

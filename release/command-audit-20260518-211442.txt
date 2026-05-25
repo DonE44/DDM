@@ -1,0 +1,92 @@
+COMMAND_AUDIT_TIMESTAMP=20260518-211442
+APP_FILE=src/App.jsx
+RESULTS_FILE=docs/command-test-results.md
+TOTAL_COMMANDS=83
+MISSING_HANDLERS=0
+MISSING_WIRING=0
+AUDIT_STATUS=PASS
+
+ALL_COMMANDS:
+- file-new
+- file-open
+- file-save
+- file-export-html
+- file-export-storybook
+- file-export-screen-png
+- file-export-page-png
+- file-export-script
+- file-import-pages
+- file-import-pdf
+- file-print
+- file-publish
+- page-new
+- page-duplicate
+- page-delete
+- page-prev
+- page-next
+- page-move-up
+- page-move-down
+- edit-undo
+- edit-redo
+- edit-copy
+- edit-paste
+- edit-duplicate
+- edit-button
+- selection-duplicate
+- selection-delete
+- select-all
+- select-none
+- layer-front
+- layer-up
+- layer-down
+- layer-back
+- align-left
+- align-hcenter
+- align-right
+- align-top
+- align-vcenter
+- align-bottom
+- space-h
+- space-v
+- nudge-left-1
+- nudge-right-1
+- nudge-up-1
+- nudge-down-1
+- nudge-left-10
+- nudge-right-10
+- nudge-up-10
+- nudge-down-10
+- group-selected
+- ungroup-selected
+- view-spread
+- view-script
+- view-script-close
+- view-variables
+- view-close-overlays
+- view-shortcuts
+- view-panel-left
+- view-panel-right
+- view-panel-bottom
+- view-media-lib
+- view-grid-toggle
+- view-zoom-in
+- view-zoom-out
+- view-zoom-fit
+- view-bg-image
+- play-start
+- play-stop
+- play-prev
+- play-next
+- play-loop-toggle
+- play-ctrl-toggle
+- play-interactive
+- play-fullscreen-toggle
+- play-dev-mode
+- tool-select
+- tool-text
+- tool-image
+- tool-button
+- tool-wipe
+- tool-mpeg
+- tool-hotspot
+- tool-menubar

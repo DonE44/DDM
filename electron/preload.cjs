@@ -9,11 +9,24 @@ console.log('[preload] Got media server port:', _mediaServerPort)
 
 console.log('[preload] About to expose smmDesktop to window')
 
+const LEGACY_INVOKE_CHANNELS = new Set([
+  'whisper:getTokenStatus',
+  'whisper:setHFToken',
+  'whisper:clearHFToken',
+])
+
 contextBridge.exposeInMainWorld('smmDesktop', {
+  invoke: (channel, ...args) => {
+    if (!LEGACY_INVOKE_CHANNELS.has(channel)) {
+      throw new Error(`Unsupported desktop invoke channel: ${channel}`)
+    }
+    return ipcRenderer.invoke(channel, ...args)
+  },
   openMme: () => ipcRenderer.invoke('dialog:open-sca'),
   saveMme: (payload) => ipcRenderer.invoke('dialog:save-sca', payload),
   selectMedia: (payload) => ipcRenderer.invoke('dialog:select-media', payload),
   readMediaDataUrl: (payload) => ipcRenderer.invoke('media:read-data-url', payload),
+  mediaExists: (payload) => ipcRenderer.invoke('media:exists', payload),
   transcodeMedia: (payload) => ipcRenderer.invoke('media:transcode', payload),
   exportMediaDiagnostics: (payload) => ipcRenderer.invoke('media:export-diagnostics', payload),
   supportedMedia: () => ipcRenderer.invoke('app:supported-media'),
@@ -65,6 +78,8 @@ contextBridge.exposeInMainWorld('smmDesktop', {
     cancel:        ()        => ipcRenderer.invoke('whisper:cancel'),
     modelStatus:   (payload) => ipcRenderer.invoke('whisper:model-status', payload),
     clearModel:    (payload) => ipcRenderer.invoke('whisper:clear-model', payload),
+    engineStatus:  ()        => ipcRenderer.invoke('whisper:engine-status'),
+    exportDebug:   (payload) => ipcRenderer.invoke('whisper:export-debug', payload),
     onProgress: (cb) => {
       const handler = (_event, data) => cb(data)
       ipcRenderer.on('whisper:progress', handler)

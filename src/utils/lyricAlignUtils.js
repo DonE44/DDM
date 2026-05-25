@@ -1,3 +1,5 @@
+// @ts-check
+
 /**
  * lyricAlignUtils.js — Force-align existing lyric text to Whisper word timestamps.
  *
@@ -8,6 +10,9 @@
  *  4. Assign line start/end from first/last matched word index per line
  *  5. Interpolate timing for unmatched lines
  */
+
+/** @typedef {{ start: number, end: number, text: string }} WhisperWord */
+/** @typedef {{ start: number, end: number, text: string, durationMs: number }} LyricTimingLine */
 
 /** @param {string} w */
 function normalizeWord(w) {
@@ -20,8 +25,8 @@ function normalizeWord(w) {
  * KaraokeText will receive WORD-level timestamps from expandSentencesToWords.
  *
  * @param {string} lyricsText  — multi-line string (one lyric line per newline)
- * @param {{ start: number, end: number, text: string }[]} whisperWords  — word-level Whisper output
- * @returns {{ start: number, end: number, text: string, durationMs: number }[]}
+ * @param {WhisperWord[]} whisperWords  — word-level Whisper output
+ * @returns {LyricTimingLine[]}
  */
 export function alignLyricsToAudio(lyricsText, whisperWords) {
   const rawLines = (lyricsText || '').split('\n').map(l => l.trim()).filter(Boolean)
@@ -32,6 +37,7 @@ export function alignLyricsToAudio(lyricsText, whisperWords) {
     return rawLines.map((text, i) => ({ start: i * 4, end: i * 4 + 4, text, durationMs: 4000 }))
   }
 
+  /** @type {LyricTimingLine[]} */
   const result = []
   let wPos = 0
 
