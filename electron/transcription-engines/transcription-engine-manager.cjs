@@ -153,6 +153,15 @@ function createTranscriptionEngineManager({ repoRoot, ffmpegPath = null, runXeno
     const containsMatch = typeof output?.containsMatch === 'boolean' ? output.containsMatch : hasTerm(text, chunks, 'match')
     return {
       engine: output?.engine || 'xenova',
+      selectedPreset: payload?.selectedPreset || null,
+      requestedEngine: payload?.engineSelection || null,
+      engineIntent: payload?.engineIntent || null,
+      resolvedEngine: output?.engine || payload?.resolvedEngine || null,
+      desiredModel: payload?.desiredModel || null,
+      transcriptionMode: payload?.transcriptionMode || 'normal',
+      openingSectionOnly: !!payload?.openingSectionOnly,
+      sectionStartSec: Number.isFinite(payload?.sectionStartSec) ? payload.sectionStartSec : null,
+      sectionEndSec: Number.isFinite(payload?.sectionEndSec) ? payload.sectionEndSec : null,
       method: output?.method || null,
       model: output?.model || payload?.modelId || null,
       modelPath: output?.modelPath || null,

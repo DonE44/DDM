@@ -170,6 +170,28 @@ async function transcribeWithWhisperCpp({ repoRoot, audioPath, language, desired
     return { ok: false, error: 'No whisper.cpp model file found.', engine: 'whisper.cpp', warnings: ['No GGML/GGUF model found'], status }
   }
 
+  if (typeof audioPath !== 'string' || !audioPath.trim()) {
+    return {
+      ok: false,
+      error: 'whisper.cpp requires a local audio file path. Re-select the audio from disk or use another engine.',
+      engine: 'whisper.cpp',
+      modelPath,
+      warnings: ['local audio path missing'],
+      status,
+    }
+  }
+
+  if (!fs.existsSync(audioPath)) {
+    return {
+      ok: false,
+      error: `Local audio file not found for whisper.cpp: ${audioPath}`,
+      engine: 'whisper.cpp',
+      modelPath,
+      warnings: ['local audio path missing on disk'],
+      status,
+    }
+  }
+
   let sourcePath = audioPath
   let tempWav = null
   if (ffmpegPath && sourcePath && !/\.wav$/i.test(sourcePath)) {

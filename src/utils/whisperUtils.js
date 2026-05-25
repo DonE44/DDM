@@ -19,7 +19,7 @@
 
 /** @typedef {{ id: string, label: string, size: string, sizeBytes: number, description: string, electronOnly?: boolean, license?: string, commercialUse?: boolean, requiresApiKey?: boolean, service?: string }} WhisperModelInfo */
 /** @typedef {{ start: number, end: number, text: string }} WhisperSegment */
-/** @typedef {{ text: string, segments: WhisperSegment[], language: string, chunks?: unknown[], wordTimestamps?: WhisperSegment[], engine?: string, method?: string, model?: string, warnings?: string[], gaps?: unknown[], containsGasoline?: boolean, containsFingers?: boolean, containsMatch?: boolean, ok?: boolean, error?: string }} WhisperResult */
+/** @typedef {{ text: string, segments: WhisperSegment[], language: string, chunks?: unknown[], wordTimestamps?: WhisperSegment[], engine?: string, method?: string, model?: string, selectedPreset?: string|null, resolvedEngine?: string|null, warnings?: string[], gaps?: unknown[], containsGasoline?: boolean, containsFingers?: boolean, containsMatch?: boolean, ok?: boolean, error?: string }} WhisperResult */
 
 /**
  * Xenova's published env type marks these flags readonly, but v2 expects apps to
@@ -117,6 +117,13 @@ export const WHISPER_MODELS = /** @type {WhisperModelInfo[]} */ ([
  * In Electron, models are cached after first download.
  */
 export const DEFAULT_WHISPER_MODEL = 'Xenova/whisper-medium'
+
+export {
+  TRANSCRIPTION_PRESETS,
+  DEFAULT_TRANSCRIPTION_PRESET_ID,
+  getTranscriptionPresetById,
+  resolveTranscriptionPreset,
+} from './transcriptionPresets.js'
 
 // ── Helper: is Electron IPC bridge available? ─────────────────────────────
 
@@ -262,6 +269,9 @@ async function transcribeViaOpenAI(audioUrl, apiKey, opts = {}) {
  * @param {{
  *   audioFilePath?: string,
  *   model?: string,
+ *   selectedPreset?: string|null,
+ *   engineIntent?: string|null,
+ *   resolvedEngine?: string|null,
  *   language?: string,
  *   apiKey?: string,
  *   _retryCount?: number,
@@ -279,6 +289,9 @@ export async function transcribe(audioUrl, options = {}) {
   const {
     audioFilePath,
     model = DEFAULT_WHISPER_MODEL,
+    selectedPreset = null,
+    engineIntent = null,
+    resolvedEngine = null,
     language,
     onModelProgress,
     onTranscribeProgress,
@@ -340,6 +353,9 @@ export async function transcribe(audioUrl, options = {}) {
       const result = await window.smmDesktop.whisper.transcribe({
         audioUrl,
         audioFilePath: audioFilePath || null,
+        selectedPreset,
+        engineIntent,
+        resolvedEngine,
         modelId: modelIdForIPC,
         engineSelection,
         desiredModel,
@@ -388,6 +404,8 @@ export async function transcribe(audioUrl, options = {}) {
         engine: result.engine || 'xenova',
         method: result.method || null,
         model: result.model || modelIdForIPC,
+        selectedPreset: (/** @type {any} */ (result))?.selectedPreset || selectedPreset || null,
+        resolvedEngine: result.engine || resolvedEngine || null,
         warnings: Array.isArray(result.warnings) ? result.warnings : [],
         gaps: Array.isArray(result.gaps) ? result.gaps : [],
         containsGasoline: !!result.containsGasoline,
@@ -546,6 +564,8 @@ export async function transcribe(audioUrl, options = {}) {
     segments,
     language: detectedLanguage,
     wordTimestamps: expandSentencesToWords(segments),
+    selectedPreset,
+    resolvedEngine: 'xenova-browser',
   }
 }
 

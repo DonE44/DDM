@@ -47,11 +47,22 @@ export default function WhisperPanel({
   onClose,
   /** Compact inline mode for embedding in inspector */
   compact = false,
+  /** Lock model selection to an externally resolved model id */
+  modelIdOverride = '',
+  /** Hide raw model selector for simple preset-driven UX */
+  hideModelSelector = false,
+  /** User-facing selected preset id (for debug metadata) */
+  selectedPreset = null,
+  /** User-facing engine intent (for debug metadata) */
+  engineIntent = null,
+  /** Resolver output showing active effective engine */
+  resolvedEngine = null,
   /** Transcription mode for Whisper main-process pipeline */
   transcriptionMode = 'normal',
 }) {
   const [available, setAvailable] = useState(/** @type {boolean|null} */ (null))
-  const [modelId, setModelId] = useState(DEFAULT_WHISPER_MODEL)
+  const [modelId, setModelId] = useState(modelIdOverride || DEFAULT_WHISPER_MODEL)
+  const activeModelId = modelIdOverride || modelId
   const [openAiKey, setOpenAiKey] = useState(() => {
     try { return localStorage.getItem('openai-api-key') || '' } catch { return '' }
   })
@@ -80,11 +91,11 @@ function ignoreError() {}
   }, [audioUrl, audioName])
 
   const refreshModelCacheStatus = useCallback(async () => {
-    const modelIdForCache = modelId.startsWith('whispercpp-') || modelId === 'auto-best'
+    const modelIdForCache = activeModelId.startsWith('whispercpp-') || activeModelId === 'auto-best'
       ? 'Xenova/whisper-medium'
-      : modelId
-    const selectedModel = WHISPER_MODELS.find((m) => m.id === modelId)
-    if (modelId === 'openai-api') {
+      : activeModelId
+    const selectedModel = WHISPER_MODELS.find((m) => m.id === activeModelId)
+    if (activeModelId === 'openai-api') {
       setModelCacheStatus({ state: 'cloud', message: 'OpenAI API uses a cloud model; no local Whisper cache is used.' })
       return
     }
@@ -109,7 +120,7 @@ function ignoreError() {}
     } finally {
       setModelCacheBusy(false)
     }
-  }, [modelId])
+  }, [activeModelId])
 
   const refreshEngineStatus = useCallback(async () => {
     if (!window.smmDesktop?.whisper?.engineStatus) return
@@ -135,21 +146,21 @@ function ignoreError() {}
 
   useEffect(() => {
     if (!transcribing) refreshModelCacheStatus()
-  }, [modelId, transcribing, refreshModelCacheStatus])
+  }, [activeModelId, transcribing, refreshModelCacheStatus])
 
   useEffect(() => {
     refreshEngineStatus()
-  }, [modelId, refreshEngineStatus])
+  }, [activeModelId, refreshEngineStatus])
 
   const handleClearModelCache = useCallback(async () => {
-    if (modelId === 'openai-api' || modelCacheBusy || transcribing) return
-    const selectedModel = WHISPER_MODELS.find((m) => m.id === modelId)
-    const label = selectedModel?.label || modelId
+    if (activeModelId === 'openai-api' || modelCacheBusy || transcribing) return
+    const selectedModel = WHISPER_MODELS.find((m) => m.id === activeModelId)
+    const label = selectedModel?.label || activeModelId
     if (!window.confirm(`Clear the cached files for ${label}? The original audio and projects will not be deleted.`)) return
 
     setModelCacheBusy(true)
     try {
-      const result = await clearWhisperCache(modelId)
+      const result = await clearWhisperCache(activeModelId)
       if (!result?.ok) throw new Error(result?.error || 'Clear failed')
       setModelCacheStatus({ state: 'missing', message: `Cleared ${label}. It will download again on next use.` })
       await refreshModelCacheStatus()
@@ -158,7 +169,7 @@ function ignoreError() {}
     } finally {
       setModelCacheBusy(false)
     }
-  }, [modelId, modelCacheBusy, transcribing, refreshModelCacheStatus])
+  }, [activeModelId, modelCacheBusy, transcribing, refreshModelCacheStatus])
 
   const handleTranscribe = useCallback(async () => {
     if (!customAudioUrl || transcribing) return
@@ -171,7 +182,10 @@ function ignoreError() {}
 
     try {
       const res = await transcribe(customAudioUrl, {
-        model: modelId,
+        model: activeModelId,
+        selectedPreset,
+        engineIntent,
+        resolvedEngine,
         audioFilePath: customAudioFilePath || undefined,
         wordTimestamps: true,
         transcriptionMode,
@@ -231,7 +245,7 @@ function ignoreError() {}
     }
   // onTranscribeComplete and onCreateLyricPages are stable callback refs from parent —
   // including them avoids stale closure without causing unnecessary re-runs.
-  }, [customAudioUrl, customAudioFilePath, modelId, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey, refreshModelCacheStatus, transcriptionMode])
+  }, [activeModelId, customAudioUrl, customAudioFilePath, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey, refreshModelCacheStatus, transcriptionMode, selectedPreset, engineIntent, resolvedEngine])
 
   const handleAbort = () => {
     abortTranscription()
@@ -291,7 +305,7 @@ function ignoreError() {}
     return (
       <div style={S.compact}>
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
-          <select value={modelId} onChange={(e) => setModelId(e.target.value)} style={S.select}>
+          <select value={activeModelId} onChange={(e) => setModelId(e.target.value)} style={S.select}>
             {WHISPER_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
           <button onClick={handleTranscribe} disabled={!customAudioUrl || transcribing} style={S.btn}>
@@ -337,44 +351,46 @@ function ignoreError() {}
       </div>
 
       {/* Model selector */}
-      <div style={S.section}>
-        <div style={S.label}>Whisper model</div>
-        <select value={modelId} onChange={(e) => setModelId(e.target.value)} style={S.selectFull}>
-          {WHISPER_MODELS.map((m) => (
-            <option key={m.id} value={m.id}>{m.label} — {m.description}</option>
-          ))}
-        </select>
-        {WHISPER_MODELS.find(m => m.id === modelId)?.electronOnly && (
-          <div style={{ fontSize: 10, color: '#f59e0b', marginTop: 2, fontWeight: 600 }}>
-            ⚠ This model requires the Electron desktop app and will error in the browser preview.
-            Use Tiny, Base, or Small for browser testing.
-          </div>
-        )}
-        {engineStatusText && (
-          <div style={{ fontSize: 10, color: 'var(--t3,#888)', marginTop: 3 }}>{engineStatusText}</div>
-        )}
-        <div style={S.cachePanel}>
-          <div style={{ ...S.muted, color: modelCacheStatus.state === 'ready' ? '#22c55e' : modelCacheStatus.state === 'error' ? '#ef4444' : 'var(--t3, #888)' }}>
-            Cache: {modelCacheStatus.message}
-          </div>
-          {modelCacheStatus.dir && (
-            <div title={modelCacheStatus.dir} style={S.cachePath}>{modelCacheStatus.dir}</div>
+      {!hideModelSelector && (
+        <div style={S.section}>
+          <div style={S.label}>Whisper model</div>
+          <select value={activeModelId} onChange={(e) => setModelId(e.target.value)} style={S.selectFull}>
+            {WHISPER_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label} — {m.description}</option>
+            ))}
+          </select>
+          {WHISPER_MODELS.find(m => m.id === activeModelId)?.electronOnly && (
+            <div style={{ fontSize: 10, color: '#f59e0b', marginTop: 2, fontWeight: 600 }}>
+              ⚠ This model requires the Electron desktop app and will error in the browser preview.
+              Use Tiny, Base, or Small for browser testing.
+            </div>
           )}
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            <button type="button" onClick={refreshModelCacheStatus} disabled={modelCacheBusy || transcribing} style={S.secondaryBtn}>
-              {modelCacheBusy ? 'Checking...' : 'Refresh cache'}
-            </button>
-            {modelId !== 'openai-api' && (
-              <button type="button" onClick={handleClearModelCache} disabled={modelCacheBusy || transcribing || modelCacheStatus.state !== 'ready'} style={S.secondaryBtn}>
-                Clear selected model
-              </button>
+          {engineStatusText && (
+            <div style={{ fontSize: 10, color: 'var(--t3,#888)', marginTop: 3 }}>{engineStatusText}</div>
+          )}
+          <div style={S.cachePanel}>
+            <div style={{ ...S.muted, color: modelCacheStatus.state === 'ready' ? '#22c55e' : modelCacheStatus.state === 'error' ? '#ef4444' : 'var(--t3, #888)' }}>
+              Cache: {modelCacheStatus.message}
+            </div>
+            {modelCacheStatus.dir && (
+              <div title={modelCacheStatus.dir} style={S.cachePath}>{modelCacheStatus.dir}</div>
             )}
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              <button type="button" onClick={refreshModelCacheStatus} disabled={modelCacheBusy || transcribing} style={S.secondaryBtn}>
+                {modelCacheBusy ? 'Checking...' : 'Refresh cache'}
+              </button>
+              {activeModelId !== 'openai-api' && (
+                <button type="button" onClick={handleClearModelCache} disabled={modelCacheBusy || transcribing || modelCacheStatus.state !== 'ready'} style={S.secondaryBtn}>
+                  Clear selected model
+                </button>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* OpenAI API key input — shown only when openai-api model is selected */}
-      {modelId === 'openai-api' && (
+      {activeModelId === 'openai-api' && (
         <div style={S.section}>
           <div style={S.label}>OpenAI API Key</div>
           <input
@@ -423,7 +439,7 @@ function ignoreError() {}
       {transcribing && modelProgress.status !== 'ready' && modelProgress.status !== 'downloading' && (
         <div style={S.section}>
           <div style={S.muted}>
-            {`Loading model… (first run downloads ${WHISPER_MODELS.find(m => m.id === modelId)?.size ?? '??'} from HuggingFace — large models can take several minutes)`}
+            {`Loading model… (first run downloads ${WHISPER_MODELS.find(m => m.id === activeModelId)?.size ?? '??'} from HuggingFace — large models can take several minutes)`}
           </div>
           <div style={{ ...S.progressBar, overflow: 'hidden' }}>
             <div style={{ ...S.progressFill, width: '100%', animation: 'whisper-pulse 1.4s ease-in-out infinite', opacity: 0.7 }} />
@@ -497,15 +513,22 @@ function ignoreError() {}
                     request: {
                       audioUrl: customAudioUrl,
                       audioFilePath: customAudioFilePath,
-                      modelId,
+                      selectedPreset,
+                      engineIntent,
+                      resolvedEngine,
+                      modelId: activeModelId,
+                      engineSelection: ['auto-best', 'whispercpp-medium', 'whispercpp-large'].includes(activeModelId) ? activeModelId : 'xenova',
+                      desiredModel: activeModelId === 'whispercpp-large' ? 'large' : 'medium',
+                      transcriptionMode,
                     },
                     output: {
                       text: result.text,
                       chunks: result.segments,
                       wordTimestamps: result.wordTimestamps || [],
                       engine: result.engine || 'xenova',
+                      resolvedEngine: result.engine || resolvedEngine || null,
                       method: result.method || null,
-                      model: result.model || modelId,
+                      model: result.model || activeModelId,
                       fullText: result.text,
                       fullTextPreview: String(result.text || '').slice(0, 1000),
                       warnings: result.warnings || [],

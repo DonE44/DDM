@@ -12,7 +12,16 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import SmartColorPicker from '../components/SmartColorPicker.tsx'
 import WhisperPanel from '../components/WhisperPanel.jsx'
-import { isWhisperAvailable, transcribe, DEFAULT_WHISPER_MODEL, WHISPER_MODELS, expandSentencesToWords, generateWordTimestamps } from '../utils/whisperUtils.js'
+import {
+  isWhisperAvailable,
+  transcribe,
+  DEFAULT_WHISPER_MODEL,
+  TRANSCRIPTION_PRESETS,
+  DEFAULT_TRANSCRIPTION_PRESET_ID,
+  resolveTranscriptionPreset,
+  expandSentencesToWords,
+  generateWordTimestamps,
+} from '../utils/whisperUtils.js'
 import { alignLyricsToAudio } from '../utils/lyricAlignUtils.js'
 import { makePage, makeElem } from '../utils/stageUtils.js'
 import WordTranscriptEditor from '../components/WordTranscriptEditor.jsx'
@@ -58,7 +67,17 @@ export default function LyricVideoWizard({
   const [transcribeResult, setTranscribeResult] = useState({ text: '', segments: [], chunks: [], engine: 'xenova', method: null, model: null, warnings: [], gaps: [] })
   const [openingLyricsWarning, setOpeningLyricsWarning] = useState('')
   const [editDebugTab, setEditDebugTab] = useState('lyric-lines')
-  const [pasteSyncModel, setPasteSyncModel] = useState(DEFAULT_WHISPER_MODEL)
+  const [transcribePresetId, setTranscribePresetId] = useState(DEFAULT_TRANSCRIPTION_PRESET_ID)
+  const [pasteSyncPresetId, setPasteSyncPresetId] = useState(DEFAULT_TRANSCRIPTION_PRESET_ID)
+  const [engineCapabilities, setEngineCapabilities] = useState(() => ({
+    hasWhisperCpp: false,
+    hasLocalPro: false,
+    hasElectronIPC: typeof window !== 'undefined' && typeof window.smmDesktop?.whisper?.engineStatus === 'function',
+  }))
+  const [hasApiKey] = useState(() => {
+    const apiKey = typeof localStorage !== 'undefined' ? (localStorage.getItem('openai-api-key') || '').trim() : ''
+    return Boolean(apiKey)
+  })
   const [lines, setLines] = useState(/** @type {LyricLine[]} */ ([]))
   const [style, setStyle] = useState(DEFAULT_STYLE)
   // bgMedia: array of { url, name, type: 'image'|'video', sourcePath? }
@@ -116,6 +135,42 @@ export default function LyricVideoWizard({
   useEffect(() => {
     isWhisperAvailable().then(setWhisperAvailable)
   }, [])
+
+  useEffect(() => {
+    const hasIPC = typeof window !== 'undefined' && typeof window.smmDesktop?.whisper?.engineStatus === 'function'
+    if (!hasIPC) return
+
+    window.smmDesktop.whisper.engineStatus()
+      .then((info) => {
+        const whisperCpp = Array.isArray(info?.availableEngines)
+          ? info.availableEngines.find((e) => e.id === 'whisper.cpp')
+          : null
+        setEngineCapabilities({
+          hasWhisperCpp: !!whisperCpp?.available,
+          hasLocalPro: false,
+          hasElectronIPC: true,
+        })
+      })
+      .catch(() => {
+        setEngineCapabilities({ hasWhisperCpp: false, hasLocalPro: false, hasElectronIPC: true })
+      })
+  }, [])
+
+  const transcribePreset = resolveTranscriptionPreset({
+    presetId: transcribePresetId,
+    hasWhisperCpp: engineCapabilities.hasWhisperCpp,
+    hasLocalPro: engineCapabilities.hasLocalPro,
+    hasApiKey,
+    hasElectronIPC: engineCapabilities.hasElectronIPC,
+  })
+
+  const pasteSyncPreset = resolveTranscriptionPreset({
+    presetId: pasteSyncPresetId,
+    hasWhisperCpp: engineCapabilities.hasWhisperCpp,
+    hasLocalPro: engineCapabilities.hasLocalPro,
+    hasApiKey,
+    hasElectronIPC: engineCapabilities.hasElectronIPC,
+  })
 
   // Track audio current time while on Step 3 so timing buttons show the live position
   useEffect(() => {
@@ -346,9 +401,12 @@ export default function LyricVideoWizard({
     try {
       const res = await transcribe(audioUrl, {
         audioFilePath: audioSourcePath || undefined,
-        model: DEFAULT_WHISPER_MODEL,
+        model: transcribePreset.modelId,
+        selectedPreset: transcribePreset.selectedPreset,
+        engineIntent: transcribePreset.engineIntent,
+        resolvedEngine: transcribePreset.resolvedEngine,
         wordTimestamps: true,
-        transcriptionMode: 'lyric-vocal-focus',
+        transcriptionMode: transcribePreset.transcriptionMode || 'lyric-vocal-focus',
         openingSectionOnly: true,
       })
       const merged = dedupeMergedSegments([...(transcribeResult.chunks || []), ...(res.segments || [])])
@@ -357,7 +415,7 @@ export default function LyricVideoWizard({
     } catch (err) {
       setOpeningLyricsWarning(`Opening retry failed: ${err?.message || String(err)}`)
     }
-  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribeResult.chunks])
+  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribePreset.engineIntent, transcribePreset.modelId, transcribePreset.resolvedEngine, transcribePreset.selectedPreset, transcribePreset.transcriptionMode, transcribeResult.chunks])
 
   const handleRetrySelectedSection = useCallback(async () => {
     if (!audioUrl) return
@@ -369,9 +427,12 @@ export default function LyricVideoWizard({
     try {
       const res = await transcribe(audioUrl, {
         audioFilePath: audioSourcePath || undefined,
-        model: DEFAULT_WHISPER_MODEL,
+        model: transcribePreset.modelId,
+        selectedPreset: transcribePreset.selectedPreset,
+        engineIntent: transcribePreset.engineIntent,
+        resolvedEngine: transcribePreset.resolvedEngine,
         wordTimestamps: true,
-        transcriptionMode: 'lyric-vocal-focus',
+        transcriptionMode: transcribePreset.transcriptionMode || 'lyric-vocal-focus',
         sectionStartSec: start,
         sectionEndSec: end,
       })
@@ -380,7 +441,7 @@ export default function LyricVideoWizard({
     } catch (err) {
       setOpeningLyricsWarning(`Section retry failed: ${err?.message || String(err)}`)
     }
-  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribeResult.chunks])
+  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribePreset.engineIntent, transcribePreset.modelId, transcribePreset.resolvedEngine, transcribePreset.selectedPreset, transcribePreset.transcriptionMode, transcribeResult.chunks])
 
   // ── Step 2 "Paste & Sync" — align pasted lyrics to audio ──────────────────
 
@@ -394,9 +455,12 @@ export default function LyricVideoWizard({
       if (audioUrl) {
         const res = await transcribe(audioUrl, {
           audioFilePath: audioSourcePath || undefined,
-          model: pasteSyncModel,
+          model: pasteSyncPreset.modelId,
+          selectedPreset: pasteSyncPreset.selectedPreset,
+          engineIntent: pasteSyncPreset.engineIntent,
+          resolvedEngine: pasteSyncPreset.resolvedEngine,
           wordTimestamps: true,
-          transcriptionMode: 'lyric-vocal-focus',
+          transcriptionMode: pasteSyncPreset.transcriptionMode || 'lyric-vocal-focus',
           onModelProgress: (p) => {
             if (p.status === 'progress' || p.status === 'download') {
               setPasteAlignStatus(`⬇ Downloading Whisper model: ${Math.round(p.progress || 0)}%`)
@@ -420,7 +484,7 @@ export default function LyricVideoWizard({
     } finally {
       setPasteAligning(false)
     }
-  }, [pasteText, audioUrl, audioSourcePath, pasteSyncModel])
+  }, [audioUrl, audioSourcePath, pasteSyncPreset.engineIntent, pasteSyncPreset.modelId, pasteSyncPreset.resolvedEngine, pasteSyncPreset.selectedPreset, pasteSyncPreset.transcriptionMode, pasteText])
 
   // ── Step 3 offline translation ─────────────────────────────────────────────
 
@@ -1090,9 +1154,30 @@ export default function LyricVideoWizard({
               {syncMode === 'transcribe' && (
                 <>
                   <p style={S.hint}>
-                    Whisper AI (runs 100% offline) detects lyrics from your audio.
-                    Larger models are more accurate — use <strong>Large Turbo</strong> or <strong>Large V3 / TITAN</strong> for best results.
+                    Choose a simple preset and FluxAura handles the engine routing.
                   </p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
+                    <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>Transcription preset</label>
+                    <select
+                      value={transcribePresetId}
+                      onChange={(e) => setTranscribePresetId(e.target.value)}
+                      style={{ ...S.numInput, width: 320 }}
+                    >
+                      {TRANSCRIPTION_PRESETS.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                    <div style={{ fontSize: 11, color: 'var(--t3,#888)' }}>{transcribePreset.preset.description}</div>
+                    {transcribePreset.warning && (
+                      <div style={{ fontSize: 11, color: '#f59e0b' }}>{transcribePreset.warning}</div>
+                    )}
+                    <details style={{ fontSize: 11, color: 'var(--t3,#888)' }}>
+                      <summary style={{ cursor: 'pointer' }}>Advanced engine details</summary>
+                      <div style={{ marginTop: 4 }}>
+                        Preset: {transcribePreset.selectedPreset} | Intent: {transcribePreset.engineIntent} | Resolved engine: {transcribePreset.resolvedEngine} | Model: {transcribePreset.modelId}
+                      </div>
+                    </details>
+                  </div>
                   {whisperAvailable === false && (
                     <div style={S.errorBox}>
                       @xenova/transformers not installed. Run <code>npm install @xenova/transformers</code> and restart.
@@ -1102,7 +1187,12 @@ export default function LyricVideoWizard({
                     <WhisperPanel
                       audioUrl={audioUrl}
                       audioName={audioName}
-                      transcriptionMode="lyric-vocal-focus"
+                      modelIdOverride={transcribePreset.modelId}
+                      hideModelSelector={true}
+                      selectedPreset={transcribePreset.selectedPreset}
+                      engineIntent={transcribePreset.engineIntent}
+                      resolvedEngine={transcribePreset.resolvedEngine}
+                      transcriptionMode={transcribePreset.transcriptionMode || 'lyric-vocal-focus'}
                       onTranscribeComplete={handleTranscribeResult}
                       onInsertText={() => {}}
                       onCreateLyricPages={(lyricLines) => {
@@ -1130,16 +1220,26 @@ export default function LyricVideoWizard({
                     style={{ ...S.textarea, fontSize: 12, lineHeight: 1.6 }}
                   />
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>Timing engine for Paste & Sync</label>
+                    <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>Timing preset for Paste & Sync</label>
                     <select
-                      value={pasteSyncModel}
-                      onChange={(e) => setPasteSyncModel(e.target.value)}
+                      value={pasteSyncPresetId}
+                      onChange={(e) => setPasteSyncPresetId(e.target.value)}
                       style={{ ...S.numInput, width: 260 }}
                     >
-                      {WHISPER_MODELS.filter((m) => ['auto-best', 'Xenova/whisper-medium', 'openai-api', 'whispercpp-medium', 'whispercpp-large'].includes(m.id)).map((m) => (
-                        <option key={m.id} value={m.id}>{m.label}</option>
+                      {TRANSCRIPTION_PRESETS.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
                       ))}
                     </select>
+                    <div style={{ fontSize: 11, color: 'var(--t3,#888)' }}>{pasteSyncPreset.preset.description}</div>
+                    {pasteSyncPreset.warning && (
+                      <div style={{ fontSize: 11, color: '#f59e0b' }}>{pasteSyncPreset.warning}</div>
+                    )}
+                    <details style={{ fontSize: 11, color: 'var(--t3,#888)' }}>
+                      <summary style={{ cursor: 'pointer' }}>Advanced engine details</summary>
+                      <div style={{ marginTop: 4 }}>
+                        Preset: {pasteSyncPreset.selectedPreset} | Intent: {pasteSyncPreset.engineIntent} | Resolved engine: {pasteSyncPreset.resolvedEngine} | Model: {pasteSyncPreset.modelId}
+                      </div>
+                    </details>
                   </div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                     <button
@@ -1169,8 +1269,7 @@ export default function LyricVideoWizard({
                     </div>
                   )}
                   <p style={{ ...S.hint, marginTop: 4 }}>
-                    💡 <strong>Sync to Audio</strong> runs Whisper (Tiny model, fast) to get word timing, then aligns
-                    your lyric lines to the audio. You can fine-tune timings in the next step.
+                    💡 <strong>Sync to Audio</strong> uses the same preset routing as Auto-Transcribe so both flows share timing behavior.
                   </p>
                 </div>
               )}
