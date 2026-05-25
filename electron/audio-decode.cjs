@@ -4,6 +4,8 @@ const fsp = require('fs/promises')
 const os = require('os')
 const { spawn } = require('child_process')
 
+const TEMP_WAV_SUFFIX = '.tmp.wav'
+
 function getFfmpegPath() {
   let bin = null
   try {
@@ -34,6 +36,35 @@ function runFfmpeg(ffmpegPath, args) {
       resolve(stderr)
     })
   })
+}
+
+function createTempWavPath(prefix = 'fluxaura-decoded') {
+  return path.join(
+    os.tmpdir(),
+    `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}${TEMP_WAV_SUFFIX}`
+  )
+}
+
+function applyLyricVocalFocusOptions(options = {}) {
+  const lyricFocus = options.lyricVocalFocus === true || options.transcriptionMode === 'lyric-vocal-focus'
+  return {
+    sampleRate: 16000,
+    mono: true,
+    normalize: lyricFocus,
+    highpass: lyricFocus ? 100 : null,
+    lowpass: lyricFocus ? 8000 : null,
+    loudnorm: lyricFocus,
+    ...options,
+  }
+}
+
+function parseDurationText(stderr) {
+  const match = String(stderr || '').match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i)
+  if (!match) return null
+  const hours = Number(match[1]) || 0
+  const minutes = Number(match[2]) || 0
+  const seconds = Number(match[3]) || 0
+  return hours * 3600 + minutes * 60 + seconds
 }
 
 function buildAudioFilter(options = {}) {
@@ -137,20 +168,18 @@ function wavDataToFloat32(buffer, wav) {
 async function decodeAudioToWav(inputPath, options = {}) {
   const ffmpegPath = getFfmpegPath()
   if (!ffmpegPath) throw new Error('ffmpeg-static not found')
-
-  const merged = {
-    sampleRate: 16000,
-    mono: true,
-    normalize: true,
-    highpass: 100,
-    lowpass: 8000,
-    loudnorm: true,
-    ...options,
+  if (typeof inputPath !== 'string' || !inputPath.trim()) {
+    throw new Error('decodeAudioToWav requires an input file path')
   }
+  if (!fs.existsSync(inputPath)) {
+    throw new Error(`Input media file not found: ${inputPath}`)
+  }
+
+  const merged = applyLyricVocalFocusOptions(options)
 
   const sampleRate = Number.isFinite(merged.sampleRate) ? merged.sampleRate : 16000
   const mono = merged.mono !== false
-  const outPath = options.outputPath || path.join(os.tmpdir(), `fluxaura-decoded-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`)
+  const outPath = options.outputPath || createTempWavPath('fluxaura-decoded')
   const filter = buildAudioFilter(merged)
 
   const args = ['-y', '-i', inputPath]
@@ -209,9 +238,28 @@ async function decodeAudioToFloat32(inputPath, options = {}) {
   }
 }
 
+async function getAudioDuration(inputPath) {
+  const ffmpegPath = getFfmpegPath()
+  if (!ffmpegPath) throw new Error('ffmpeg-static not found')
+  if (typeof inputPath !== 'string' || !inputPath.trim()) {
+    throw new Error('getAudioDuration requires an input file path')
+  }
+  if (!fs.existsSync(inputPath)) {
+    throw new Error(`Input media file not found: ${inputPath}`)
+  }
+
+  const stderr = await runFfmpeg(ffmpegPath, ['-hide_banner', '-i', inputPath, '-f', 'null', '-'])
+  const durationSec = parseDurationText(stderr)
+  if (!Number.isFinite(durationSec)) {
+    throw new Error(`Could not determine audio duration for: ${inputPath}`)
+  }
+  return durationSec
+}
+
 module.exports = {
   getFfmpegPath,
   decodeAudioToWav,
   loadWavToFloat32Array,
   decodeAudioToFloat32,
+  getAudioDuration,
 }

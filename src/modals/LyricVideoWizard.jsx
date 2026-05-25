@@ -74,6 +74,7 @@ export default function LyricVideoWizard({
     hasLocalPro: false,
     hasElectronIPC: typeof window !== 'undefined' && typeof window.smmDesktop?.whisper?.engineStatus === 'function',
   }))
+  const [localProStatus, setLocalProStatus] = useState(null)
   const [hasApiKey] = useState(() => {
     const apiKey = typeof localStorage !== 'undefined' ? (localStorage.getItem('openai-api-key') || '').trim() : ''
     return Boolean(apiKey)
@@ -145,13 +146,18 @@ export default function LyricVideoWizard({
         const whisperCpp = Array.isArray(info?.availableEngines)
           ? info.availableEngines.find((e) => e.id === 'whisper.cpp')
           : null
+        const localPro = Array.isArray(info?.availableEngines)
+          ? info.availableEngines.find((e) => e.id === 'local-pro')
+          : null
+        setLocalProStatus(localPro || null)
         setEngineCapabilities({
           hasWhisperCpp: !!whisperCpp?.available,
-          hasLocalPro: false,
+          hasLocalPro: !!localPro?.runtimeEnabled,
           hasElectronIPC: true,
         })
       })
       .catch(() => {
+        setLocalProStatus(null)
         setEngineCapabilities({ hasWhisperCpp: false, hasLocalPro: false, hasElectronIPC: true })
       })
   }, [])
@@ -160,6 +166,8 @@ export default function LyricVideoWizard({
     presetId: transcribePresetId,
     hasWhisperCpp: engineCapabilities.hasWhisperCpp,
     hasLocalPro: engineCapabilities.hasLocalPro,
+    localProSetupState: localProStatus?.setupState || 'Setup required',
+    localProSetupHint: localProStatus?.setupHint || 'Local Pro setup required.',
     hasApiKey,
     hasElectronIPC: engineCapabilities.hasElectronIPC,
   })
@@ -168,9 +176,38 @@ export default function LyricVideoWizard({
     presetId: pasteSyncPresetId,
     hasWhisperCpp: engineCapabilities.hasWhisperCpp,
     hasLocalPro: engineCapabilities.hasLocalPro,
+    localProSetupState: localProStatus?.setupState || 'Setup required',
+    localProSetupHint: localProStatus?.setupHint || 'Local Pro setup required.',
     hasApiKey,
     hasElectronIPC: engineCapabilities.hasElectronIPC,
   })
+
+  const renderLocalProDetails = useCallback(() => {
+    if (!localProStatus) return null
+    const items = [
+      ['Status', localProStatus.setupState || 'Unknown'],
+      ['Hint', localProStatus.setupHint || ''],
+      ['Python', localProStatus.python?.found ? `${localProStatus.python.version || 'found'}${localProStatus.python.path ? ` — ${localProStatus.python.path}` : ''}` : 'Missing'],
+      ['pip', localProStatus.pip?.found ? `${localProStatus.pip.version || 'found'}${localProStatus.pip.path ? ` — ${localProStatus.pip.path}` : ''}` : 'Missing'],
+      ['Faster-Whisper', localProStatus.fasterWhisper?.found ? (localProStatus.fasterWhisper.version || 'Installed') : 'Missing'],
+      ['Demucs', localProStatus.demucs?.found ? (localProStatus.demucs.version || 'Installed') : 'Missing'],
+      ['Model folders', Array.isArray(localProStatus.models) && localProStatus.models.length ? `${localProStatus.models.length} detected` : 'None detected'],
+    ]
+    return (
+      <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {items.map(([label, value]) => (
+          <div key={label} style={{ fontSize: 11 }}>
+            <strong>{label}:</strong> {value}
+          </div>
+        ))}
+        {Array.isArray(localProStatus.models) && localProStatus.models.length > 0 && (
+          <div style={{ fontSize: 11 }}>
+            <strong>Detected paths:</strong> {localProStatus.models.slice(0, 3).map((model) => model.path).join(' | ')}
+          </div>
+        )}
+      </div>
+    )
+  }, [localProStatus])
 
   // Track audio current time while on Step 3 so timing buttons show the live position
   useEffect(() => {
@@ -1176,6 +1213,7 @@ export default function LyricVideoWizard({
                       <div style={{ marginTop: 4 }}>
                         Preset: {transcribePreset.selectedPreset} | Intent: {transcribePreset.engineIntent} | Resolved engine: {transcribePreset.resolvedEngine} | Model: {transcribePreset.modelId}
                       </div>
+                      {transcribePreset.selectedPreset === 'local-pro' && renderLocalProDetails()}
                     </details>
                   </div>
                   {whisperAvailable === false && (
@@ -1239,6 +1277,7 @@ export default function LyricVideoWizard({
                       <div style={{ marginTop: 4 }}>
                         Preset: {pasteSyncPreset.selectedPreset} | Intent: {pasteSyncPreset.engineIntent} | Resolved engine: {pasteSyncPreset.resolvedEngine} | Model: {pasteSyncPreset.modelId}
                       </div>
+                      {pasteSyncPreset.selectedPreset === 'local-pro' && renderLocalProDetails()}
                     </details>
                   </div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>

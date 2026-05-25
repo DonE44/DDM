@@ -1,5 +1,6 @@
 const path = require('path')
 const { findWhisperCppAssets, transcribeWithWhisperCpp } = require('./whispercpp-engine.cjs')
+const { detectLocalProTools } = require('./local-pro-tools.cjs')
 
 function normalizeWords(chunks) {
   const out = []
@@ -66,10 +67,26 @@ function createTranscriptionEngineManager({ repoRoot, ffmpegPath = null, runXeno
 
   async function getEngineStatus() {
     const whisperCpp = await findWhisperCppAssets(repoRoot)
+    const localPro = await detectLocalProTools(repoRoot)
     return {
       defaultEngine: 'xenova',
       availableEngines: [
         { id: 'xenova', available: true, label: 'Xenova Medium' },
+        {
+          id: 'local-pro',
+          available: false,
+          foundationAvailable: !!localPro.foundationAvailable,
+          runtimeEnabled: false,
+          label: localPro.setupState === 'Available' ? 'Local Pro (foundation ready)' : 'Local Pro (setup required)',
+          setupState: localPro.setupState,
+          setupHint: localPro.setupHint,
+          python: localPro.python,
+          pip: localPro.pip,
+          fasterWhisper: localPro.fasterWhisper,
+          demucs: localPro.demucs,
+          whisperCpp: localPro.whisperCpp,
+          models: localPro.models,
+        },
         {
           id: 'whisper.cpp',
           available: whisperCpp.available,

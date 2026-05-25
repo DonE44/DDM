@@ -68,6 +68,8 @@ export function resolveTranscriptionPreset({
   presetId,
   hasWhisperCpp = false,
   hasLocalPro = false,
+  localProSetupState = 'Setup required',
+  localProSetupHint = 'Local Pro setup required.',
   hasApiKey = false,
   hasElectronIPC = false,
 } = {}) {
@@ -137,36 +139,7 @@ export function resolveTranscriptionPreset({
   }
 
   if (preset.id === 'local-pro') {
-    if (hasLocalPro && hasElectronIPC) {
-      return {
-        preset,
-        transcriptionMode: preset.transcriptionMode,
-        selectedPreset: preset.id,
-        modelId: 'auto-best',
-        engineIntent: preset.engineIntent,
-        resolvedEngine: 'local-pro',
-        requiresApiKey: false,
-        requiresLocalTools: true,
-        available: true,
-        warning: '',
-        fallbackApplied: false,
-      }
-    }
-    if (hasWhisperCpp && hasElectronIPC) {
-      return {
-        preset,
-        transcriptionMode: preset.transcriptionMode,
-        selectedPreset: preset.id,
-        modelId: 'whispercpp-large',
-        engineIntent: preset.engineIntent,
-        resolvedEngine: 'whisper.cpp',
-        requiresApiKey: false,
-        requiresLocalTools: true,
-        available: false,
-        warning: 'Local Pro tools not installed. Using Fast Local fallback.',
-        fallbackApplied: true,
-      }
-    }
+    const localProReady = hasLocalPro && hasElectronIPC
     return {
       preset,
       transcriptionMode: preset.transcriptionMode,
@@ -176,8 +149,10 @@ export function resolveTranscriptionPreset({
       resolvedEngine: 'xenova',
       requiresApiKey: false,
       requiresLocalTools: true,
-      available: false,
-      warning: 'Local Pro tools not installed. Using Compatibility fallback.',
+      available: localProReady,
+      warning: localProReady
+        ? 'Local Pro foundation is available, but runtime execution is not enabled yet in Phase 2A. Using Compatibility fallback.'
+        : `${localProSetupState}. ${localProSetupHint} Using Compatibility fallback.`,
       fallbackApplied: true,
     }
   }

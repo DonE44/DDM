@@ -558,9 +558,19 @@ interface WhisperEngineStatusResult {
     id: string
     label?: string
     available?: boolean
+    foundationAvailable?: boolean
+    runtimeEnabled?: boolean
+    setupState?: string
+    setupHint?: string
     executablePath?: string | null
     modelCandidates?: string[]
     searchRoots?: string[]
+    python?: { found?: boolean, path?: string | null, version?: string | null }
+    pip?: { found?: boolean, path?: string | null, version?: string | null }
+    fasterWhisper?: { found?: boolean, version?: string | null }
+    demucs?: { found?: boolean, version?: string | null }
+    whisperCpp?: { found?: boolean, path?: string | null }
+    models?: Array<{ path: string, reason?: string, fileCount?: number }>
   }>
 }
 

@@ -29,9 +29,14 @@ dist-ssr
 
 # Build outputs and installer artifacts (too large for normal GitHub push)
 release/.cache/
+release/.npm-cache/
 release/win-unpacked/
 release/*.exe
 release/*.blockmap
 release/*.zip
 release/*.7z
 release/*.asar
+node_modules_old*/
+node_modules_broken*/
+*.tmp.wav
+*.transcription-debug.json
