@@ -40,3 +40,5 @@ node_modules_old*/
 node_modules_broken*/
 *.tmp.wav
 *.transcription-debug.json
+
+.venv-local-pro/
