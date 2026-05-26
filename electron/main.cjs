@@ -463,12 +463,6 @@ if (app) {
     // ── HuggingFace token authentication setup ──────────────────────────────────
     const userDataPath = app.getPath('userData')
     hfAuth.init(userDataPath)
-    
-    // Load token if available and set HF_TOKEN env var
-    const token = await hfAuth.getToken()
-    if (token) {
-      console.log('[hf-auth] Token loaded from config, HF_TOKEN set')
-    }
     _diagWrite('HF_AUTH_DONE')
 
     // Keep app-media:// registered as a fallback (for edge cases / future use)
@@ -563,6 +557,7 @@ if (app) {
 
   ipcMain.handle('whisper:getTokenStatus', async () => {
     console.log('[ipc] whisper:getTokenStatus called')
+    await hfAuth.getToken()
     return await hfAuth.getStatus()
   })
 

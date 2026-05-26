@@ -30,6 +30,7 @@ const http = require('http')
 const { createTranscriptionEngineManager } = require('./transcription-engines/transcription-engine-manager.cjs')
 const audioDecode = require('./audio-decode.cjs')
 const { runXenovaFloat32 } = require('./transcription-engines/xenova-engine.cjs')
+const hfAuth = require('./hf-auth.cjs')
 
 const REPO_ROOT = path.resolve(__dirname, '..')
 const ffmpegPath = audioDecode.getFfmpegPath()
@@ -859,7 +860,11 @@ async function runTranscription(event, payload) {
 function registerWhisperTranscribeIPC() {
   ipcMain.handle('whisper:transcribe', async (event, payload) => {
     try {
+      await hfAuth.getToken()
       console.log('[whisper:transcribe] IPC handler called', { modelId: payload.modelId, audioUrl: payload.audioUrl?.substring(0, 50) })
+      console.log('[whisper:transcribe] audioFilePath:', payload?.audioFilePath || null)
+      console.log('[whisper:transcribe] preset:', payload?.selectedPreset || null)
+      console.log('[whisper:transcribe] resolvedEngine:', payload?.resolvedEngine || null)
       const output = await runTranscription(event, payload)
       // runTranscription now returns pre-processed { start, end, text } chunks directly
       // (manual windowed chunking + hallucination filter + time-proximity dedup applied)
@@ -874,6 +879,11 @@ function registerWhisperTranscribeIPC() {
         method: output.method || null,
         model: output.model || payload.modelId || null,
         modelPath: output.modelPath || null,
+        demucsUsed: !!output.demucsUsed,
+        beamSize: Number.isFinite(output.beamSize) ? output.beamSize : null,
+        vadFilter: typeof output.vadFilter === 'boolean' ? output.vadFilter : null,
+        localProTimings: output.localProTimings || null,
+        transcriptionDurationSec: Number.isFinite(output.transcriptionDurationSec) ? output.transcriptionDurationSec : null,
         warnings: output.warnings || [],
         gaps: output.gaps || [],
         containsGasoline: !!output.containsGasoline,

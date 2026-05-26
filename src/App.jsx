@@ -5033,24 +5033,6 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Initialize HuggingFace token for onnx-community model access
-  useEffect(() => {
-    if (desktopApi?.whisper?.setHFToken && typeof window !== 'undefined') {
-      // Try to load from localStorage
-      const savedToken = typeof localStorage !== 'undefined' 
-        ? localStorage.getItem('hf-api-token') 
-        : null
-      
-      if (savedToken) {
-        console.log('[App] Initializing HuggingFace token from storage')
-        desktopApi.whisper.setHFToken({ token: savedToken }).catch(err => {
-          console.warn('[App] Failed to set HF token:', err.message)
-        })
-      }
-    }
-  // desktopApi is stable; intentionally runs once on mount to restore saved HF token
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
   useEffect(() => {
     panelSizesRef.current = panelSizes
     try { localStorage.setItem('mme_panelSizes', JSON.stringify(panelSizes)) } catch { /* noop */ }
