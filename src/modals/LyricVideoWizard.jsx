@@ -9,7 +9,7 @@
  * Step 5 — Generate (creates pages + presentationAudio + opens project)
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import SmartColorPicker from '../components/SmartColorPicker.tsx'
 import WhisperPanel from '../components/WhisperPanel.jsx'
 import {
@@ -18,7 +18,11 @@ import {
   DEFAULT_WHISPER_MODEL,
   TRANSCRIPTION_PRESETS,
   DEFAULT_TRANSCRIPTION_PRESET_ID,
+  LOCAL_PRO_PERFORMANCE_PROFILES,
+  DEFAULT_LOCAL_PRO_PROFILE_ID,
+  getLocalProProfileById,
   resolveTranscriptionPreset,
+  buildLyricLinesFromWords,
   expandSentencesToWords,
   generateWordTimestamps,
 } from '../utils/whisperUtils.js'
@@ -48,6 +52,40 @@ const DEFAULT_STYLE = {
 }
 
 const FONT_LIST = [] // removed — font selection is now handled by FontPicker component
+const LYRIC_LINE_STYLE_PRESETS = {
+  balanced: {
+    label: 'Balanced',
+    maxChars: 48,
+    maxDurationSec: 4.5,
+    pauseBreakSec: 0.7,
+    strongPauseBreakSec: 0.9,
+    minWordsPerLine: 2,
+  },
+  'karaoke-tight': {
+    label: 'Karaoke Tight',
+    maxChars: 22,
+    maxDurationSec: 2.4,
+    pauseBreakSec: 0.28,
+    strongPauseBreakSec: 0.55,
+    minWordsPerLine: 1,
+  },
+  subtitle: {
+    label: 'Subtitle',
+    maxChars: 56,
+    maxDurationSec: 6.0,
+    pauseBreakSec: 0.75,
+    strongPauseBreakSec: 1.1,
+    minWordsPerLine: 3,
+  },
+  'word-sync': {
+    label: 'Word Sync',
+    maxChars: 18,
+    maxDurationSec: 1.8,
+    pauseBreakSec: 0.25,
+    strongPauseBreakSec: 0.45,
+    minWordsPerLine: 1,
+  },
+}
 
 export default function LyricVideoWizard({
   /** Called when user completes the wizard — receives { pages, presentationAudio } */
@@ -65,10 +103,24 @@ export default function LyricVideoWizard({
   const [audioName, setAudioName] = useState('')
   const [audioSourcePath, setAudioSourcePath] = useState('')
   const [transcribeResult, setTranscribeResult] = useState({ text: '', segments: [], chunks: [], engine: 'xenova', method: null, model: null, warnings: [], gaps: [] })
+  const [rawTranscriptDraft, setRawTranscriptDraft] = useState('')
   const [openingLyricsWarning, setOpeningLyricsWarning] = useState('')
   const [editDebugTab, setEditDebugTab] = useState('lyric-lines')
   const [transcribePresetId, setTranscribePresetId] = useState(DEFAULT_TRANSCRIPTION_PRESET_ID)
   const [pasteSyncPresetId, setPasteSyncPresetId] = useState(DEFAULT_TRANSCRIPTION_PRESET_ID)
+  const [localProOptions, setLocalProOptions] = useState(() => ({
+    profileId: DEFAULT_LOCAL_PRO_PROFILE_ID,
+    model: 'medium',
+    useVocalIsolation: true,
+    beamSize: 5,
+    vadFilter: true,
+    device: 'cpu',
+    computeType: 'int8',
+    allowFallbackOnFailure: false,
+    languageMode: 'auto',
+    language: '',
+    initialPrompt: '',
+  }))
   const [engineCapabilities, setEngineCapabilities] = useState(() => ({
     hasWhisperCpp: false,
     hasLocalPro: false,
@@ -132,6 +184,10 @@ export default function LyricVideoWizard({
   const [audioTime, setAudioTime] = useState(0)
   // Step 3 view: 'table' (stamp editor) or 'timeline' (drag timeline)
   const [step3View, setStep3View] = useState(/** @type {'table'|'timeline'} */ ('table'))
+  const [lyricLineStyle, setLyricLineStyle] = useState('balanced')
+  const [selectedRowIndex, setSelectedRowIndex] = useState(0)
+  const [liveTimingMode, setLiveTimingMode] = useState(false)
+  const rowRefs = useRef(/** @type {(HTMLTableRowElement | null)[]} */ ([]))
 
   useEffect(() => {
     isWhisperAvailable().then(setWhisperAvailable)
@@ -166,27 +222,50 @@ export default function LyricVideoWizard({
     presetId: transcribePresetId,
     hasWhisperCpp: engineCapabilities.hasWhisperCpp,
     hasLocalPro: engineCapabilities.hasLocalPro,
+    localProRuntimeEnabled: !!localProStatus?.runtimeEnabled,
     localProSetupState: localProStatus?.setupState || 'Setup required',
     localProSetupHint: localProStatus?.setupHint || 'Local Pro setup required.',
     hasApiKey,
     hasElectronIPC: engineCapabilities.hasElectronIPC,
+    localProOptions,
   })
 
   const pasteSyncPreset = resolveTranscriptionPreset({
     presetId: pasteSyncPresetId,
     hasWhisperCpp: engineCapabilities.hasWhisperCpp,
     hasLocalPro: engineCapabilities.hasLocalPro,
+    localProRuntimeEnabled: !!localProStatus?.runtimeEnabled,
     localProSetupState: localProStatus?.setupState || 'Setup required',
     localProSetupHint: localProStatus?.setupHint || 'Local Pro setup required.',
     hasApiKey,
     hasElectronIPC: engineCapabilities.hasElectronIPC,
+    localProOptions,
   })
+
+  const selectedLocalProProfile = useMemo(() => getLocalProProfileById(localProOptions?.profileId), [localProOptions?.profileId])
+  const localProPreflight = (() => {
+    const profile = selectedLocalProProfile || getLocalProProfileById(DEFAULT_LOCAL_PRO_PROFILE_ID)
+    const gpu = localProStatus?.gpu || null
+    const gpuText = gpu?.available
+      ? `${gpu.gpus?.[0]?.name || 'NVIDIA GPU detected'} (${gpu.gpus?.[0]?.memoryTotal || 'VRAM unknown'})`
+      : 'No CUDA GPU detected; CPU mode recommended.'
+    const heavyModel = String(localProOptions?.model || '').includes('large')
+    return {
+      profile,
+      gpuText,
+      heavyModel,
+      warning: heavyModel
+        ? 'Large-v3 can lock up on some systems. If it stalls, switch to Balanced or Fast.'
+        : '',
+    }
+  })()
 
   const renderLocalProDetails = useCallback(() => {
     if (!localProStatus) return null
     const items = [
       ['Status', localProStatus.setupState || 'Unknown'],
       ['Hint', localProStatus.setupHint || ''],
+      ['GPU', localProStatus.gpu?.available ? (localProStatus.gpu?.gpus?.[0]?.name || 'CUDA-capable GPU detected') : (localProStatus.gpu?.message || 'No CUDA GPU detected')],
       ['Python', localProStatus.python?.found ? `${localProStatus.python.version || 'found'}${localProStatus.python.path ? ` — ${localProStatus.python.path}` : ''}` : 'Missing'],
       ['pip', localProStatus.pip?.found ? `${localProStatus.pip.version || 'found'}${localProStatus.pip.path ? ` — ${localProStatus.pip.path}` : ''}` : 'Missing'],
       ['Faster-Whisper', localProStatus.fasterWhisper?.found ? (localProStatus.fasterWhisper.version || 'Installed') : 'Missing'],
@@ -208,6 +287,123 @@ export default function LyricVideoWizard({
       </div>
     )
   }, [localProStatus])
+
+  const renderLocalProRuntimeControls = useCallback(() => {
+    const modelOptions = ['tiny', 'base', 'small', 'medium', 'large-v3']
+    return (
+      <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border,#333)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>
+          Performance profile
+          <select
+            value={localProOptions.profileId || DEFAULT_LOCAL_PRO_PROFILE_ID}
+            onChange={(e) => {
+              const profile = getLocalProProfileById(e.target.value)
+              setLocalProOptions((prev) => ({
+                ...prev,
+                profileId: profile.id,
+                model: profile.model,
+                beamSize: profile.beamSize,
+                vadFilter: profile.vadFilter,
+                device: profile.device,
+                computeType: profile.computeType,
+              }))
+            }}
+            style={{ ...S.numInput, width: '100%', marginTop: 2 }}
+          >
+            {LOCAL_PRO_PERFORMANCE_PROFILES.map((profile) => (
+              <option key={profile.id} value={profile.id}>{profile.label}</option>
+            ))}
+          </select>
+        </label>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>
+          Faster-Whisper model
+          <select
+            value={localProOptions.model}
+            onChange={(e) => setLocalProOptions((prev) => ({ ...prev, model: e.target.value }))}
+            style={{ ...S.numInput, width: '100%', marginTop: 2 }}
+          >
+            {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>
+          Beam size
+          <input
+            type="number"
+            min={1}
+            max={10}
+            value={localProOptions.beamSize}
+            onChange={(e) => setLocalProOptions((prev) => ({ ...prev, beamSize: Math.max(1, Math.min(10, Number(e.target.value) || 5)) }))}
+            style={{ ...S.numInput, width: '100%', marginTop: 2 }}
+          />
+        </label>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={!!localProOptions.useVocalIsolation}
+            onChange={(e) => setLocalProOptions((prev) => ({ ...prev, useVocalIsolation: e.target.checked }))}
+          />
+          Vocal isolation (Demucs)
+        </label>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={localProOptions.vadFilter !== false}
+            onChange={(e) => setLocalProOptions((prev) => ({ ...prev, vadFilter: e.target.checked }))}
+          />
+          VAD filter
+        </label>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={localProOptions.allowFallbackOnFailure === true}
+            onChange={(e) => setLocalProOptions((prev) => ({ ...prev, allowFallbackOnFailure: e.target.checked }))}
+          />
+          Allow Compatibility fallback on failure
+        </label>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>
+          Language mode
+          <select
+            value={localProOptions.languageMode}
+            onChange={(e) => setLocalProOptions((prev) => ({ ...prev, languageMode: e.target.value }))}
+            style={{ ...S.numInput, width: '100%', marginTop: 2 }}
+          >
+            <option value="auto">Auto</option>
+            <option value="manual">Manual</option>
+          </select>
+        </label>
+        <label style={{ fontSize: 11, color: 'var(--t3,#888)' }}>
+          Manual language
+          <input
+            type="text"
+            placeholder="en"
+            disabled={localProOptions.languageMode !== 'manual'}
+            value={localProOptions.language}
+            onChange={(e) => setLocalProOptions((prev) => ({ ...prev, language: e.target.value }))}
+            style={{ ...S.numInput, width: '100%', marginTop: 2, opacity: localProOptions.languageMode === 'manual' ? 1 : 0.6 }}
+          />
+        </label>
+        <div style={{ gridColumn: '1 / -1', marginTop: 4, padding: 6, borderRadius: 6, border: '1px solid var(--border,#333)', background: 'var(--bg3,#1f1f1f)' }}>
+          <div style={{ fontSize: 11, color: 'var(--t2,#bbb)' }}>
+            Preflight: {localProPreflight.profile.label} | {localProPreflight.profile.estimatedRuntime} | {localProPreflight.profile.estimatedRam}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--t3,#888)', marginTop: 2 }}>
+            Compute path: {String(localProOptions.device || localProPreflight.profile.device || 'cpu').toUpperCase()} / {String(localProOptions.computeType || localProPreflight.profile.computeType || 'int8')}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--t3,#888)', marginTop: 2 }}>
+            GPU status: {localProPreflight.gpuText}
+          </div>
+          {localProPreflight.warning && (
+            <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 3 }}>{localProPreflight.warning}</div>
+          )}
+          {localProOptions.allowFallbackOnFailure !== true && (
+            <div style={{ fontSize: 11, color: '#93c5fd', marginTop: 3 }}>
+              Fallback is OFF: Local Pro errors will be shown directly instead of silently switching engines.
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }, [localProOptions, localProPreflight])
 
   // Track audio current time while on Step 3 so timing buttons show the live position
   useEffect(() => {
@@ -239,6 +435,94 @@ export default function LyricVideoWizard({
     return `${m}:${sec.padStart(4, '0')}`
   }
 
+  const getActiveLineStyle = useCallback(() => {
+    const selected = LYRIC_LINE_STYLE_PRESETS[lyricLineStyle] ?? LYRIC_LINE_STYLE_PRESETS.balanced
+    return {
+      presetKey: lyricLineStyle,
+      presetLabel: selected.label || 'Balanced',
+      options: {
+        maxChars: selected.maxChars,
+        maxDurationSec: selected.maxDurationSec,
+        pauseBreakSec: selected.pauseBreakSec,
+        strongPauseBreakSec: selected.strongPauseBreakSec,
+        minWordsPerLine: selected.minWordsPerLine,
+      },
+    }
+  }, [lyricLineStyle])
+
+  const rebuildFromWordSegments = useCallback((words, source) => {
+    const active = getActiveLineStyle()
+    const rebuilt = buildLyricLinesFromWords(words, active.options)
+    const normalized = rebuilt.map((line) => ({
+      id: uid(),
+      start: Number(line.start) || 0,
+      end: Number(line.end) || 0,
+      text: String(line.text || '').trim(),
+      durationMs: Number(line.durationMs) || Math.max(500, Math.round(((Number(line.end) || 0) - (Number(line.start) || 0)) * 1000)),
+    }))
+
+    console.log('[LyricWizard] lyric rebuild', {
+      source,
+      selectedLineStyle: active.presetKey,
+      lineStyleLabel: active.presetLabel,
+      options: active.options,
+      inputWordCount: Array.isArray(words) ? words.length : 0,
+      outputLineCount: normalized.length,
+      first10GeneratedLines: normalized.slice(0, 10).map((l, i) => ({
+        index: i + 1,
+        start: l.start,
+        end: l.end,
+        text: l.text,
+      })),
+    })
+
+    return normalized
+  }, [getActiveLineStyle])
+
+  /** Precomputed line counts per preset, updates when wordSegments changes */
+  const previewLineCounts = useMemo(() => {
+    if (!wordSegments.length) return {}
+    return Object.fromEntries(
+      Object.entries(LYRIC_LINE_STYLE_PRESETS).map(([key, preset]) => [
+        key,
+        buildLyricLinesFromWords(wordSegments, preset).length,
+      ])
+    )
+  }, [wordSegments])
+
+  const reparseRawTranscript = useCallback((rawText) => {
+    const txt = String(rawText || '').trim()
+    const sentences = txt
+      .split(/(?<=[.!?,;])\s+|\n+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (!sentences.length) return
+
+    const rebuiltSegments = sentences.map((s, idx) => ({
+      start: idx * 4,
+      end: (idx + 1) * 4,
+      text: s,
+    }))
+    const rebuiltWords = expandSentencesToWords(rebuiltSegments)
+    const rebuiltLines = rebuildFromWordSegments(rebuiltWords, 'raw-reparse')
+
+    setWordSegments(rebuiltWords)
+    setTranscribeResult((prev) => ({
+      ...prev,
+      text: txt,
+      segments: rebuiltSegments,
+      chunks: rebuiltSegments,
+    }))
+    setRawTranscriptDraft(txt)
+    setLines(rebuiltLines.length ? rebuiltLines : sentences.map((s, idx) => ({
+      id: uid(),
+      start: idx * 4,
+      end: (idx + 1) * 4,
+      text: s,
+      durationMs: 4000,
+    })))
+  }, [rebuildFromWordSegments])
+
   const isLyricCandidate = useCallback((txt) => {
     const t = String(txt || '').trim()
     if (!t) return false
@@ -266,65 +550,8 @@ export default function LyricVideoWizard({
     return out
   }, [])
 
-  const buildLyricLinesFromWords = useCallback((words, firstTimedSegmentStart) => {
-    const lyricLines = []
-    if (!Array.isArray(words) || words.length === 0) return lyricLines
-
-    const MAX_CHARS = 56
-    const MAX_DURATION = 4.8
-    const GAP_THRESHOLD_S = 3
-    let cursor = 0
-    let lastPageEnd = 0
-
-    while (cursor < words.length) {
-      const startWord = words[cursor]
-      const start = Number.isFinite(startWord?.start) ? startWord.start : lastPageEnd
-      if (start - lastPageEnd > GAP_THRESHOLD_S) {
-        const gapText = (lastPageEnd < 1 && start >= 15)
-          ? `[POSSIBLE MISSING VOCALS ${lastPageEnd.toFixed(1)}s-${start.toFixed(1)}s — retry/opening section/manual edit]`
-          : ''
-        lyricLines.push({
-          id: uid(),
-          start: Math.round(lastPageEnd * 1000) / 1000,
-          end: Math.round(start * 1000) / 1000,
-          text: gapText,
-          durationMs: Math.round((start - lastPageEnd) * 1000),
-        })
-      }
-
-      let endIdx = cursor
-      let text = ''
-      let end = start
-      while (endIdx < words.length) {
-        const candidate = words[endIdx]
-        const cText = String(candidate?.text || '').replace(/^\s+/, '')
-        const cStart = Number.isFinite(candidate?.start) ? candidate.start : end
-        const cEnd = Number.isFinite(candidate?.end) ? candidate.end : cStart + 0.35
-        const merged = `${text}${text ? ' ' : ''}${cText}`.trim()
-        const span = cEnd - start
-        const shouldBreakOnPause = endIdx > cursor && cStart - end > 0.65
-        const shouldBreakOnPunct = /[,.!?;:]$/.test(text)
-        if (merged.length > MAX_CHARS || span > MAX_DURATION || shouldBreakOnPause || shouldBreakOnPunct) {
-          break
-        }
-        text = merged
-        end = cEnd
-        endIdx += 1
-      }
-
-      if (text) {
-        lyricLines.push({
-          id: uid(),
-          start: Math.round(start * 1000) / 1000,
-          end: Math.round(end * 1000) / 1000,
-          text,
-          durationMs: Math.round((end - start) * 1000),
-        })
-        lastPageEnd = end
-      }
-      cursor = Math.max(cursor + 1, endIdx)
-    }
-
+  const buildLyricLinesFromWordsLocal = useCallback((words, firstTimedSegmentStart) => {
+    const lyricLines = rebuildFromWordSegments(words, 'transcribe-result')
     if (firstTimedSegmentStart >= 15 && lyricLines.length > 0 && lyricLines[0].start > 8) {
       lyricLines.unshift({
         id: uid(),
@@ -334,8 +561,17 @@ export default function LyricVideoWizard({
         durationMs: Math.round(lyricLines[0].start * 1000),
       })
     }
-
     return lyricLines
+  }, [rebuildFromWordSegments])
+
+  const confirmLocalProHeavyRun = useCallback((preset, contextLabel = 'Local Pro run') => {
+    if (String(preset?.resolvedEngine || '').toLowerCase() !== 'local-pro') return true
+    const model = String(preset?.localProOptions?.model || '').toLowerCase()
+    if (!model.includes('large')) return true
+    return window.confirm(
+      `${contextLabel}: Large-v3 can lock up or time out on some systems. Continue?\n\n` +
+      'Recommendation: use Balanced or Fast profile if this fails.'
+    )
   }, [])
 
   // ── Step 1: Pick audio ────────────────────────────────────────────────────
@@ -363,7 +599,20 @@ export default function LyricVideoWizard({
 
   // ── Step 2: Transcription results → lines ────────────────────────────────
 
-  const handleTranscribeResult = useCallback(({ text, segments, chunks, wordTimestamps, engine, method, model, warnings, gaps }) => {
+  /** @param {any} result */
+  const handleTranscribeResult = useCallback((result) => {
+    const safeResult = /** @type {any} */ (result || {})
+    const {
+      text,
+      segments,
+      chunks,
+      wordTimestamps = [],
+      engine,
+      method,
+      model,
+      warnings = [],
+      gaps = [],
+    } = safeResult
     try {
       const safeSegments = Array.isArray(segments) ? segments : Array.isArray(chunks) ? chunks : []
       const orderedSegments = [...safeSegments].sort((a, b) => {
@@ -381,6 +630,7 @@ export default function LyricVideoWizard({
         warnings: Array.isArray(warnings) ? warnings : [],
         gaps: Array.isArray(gaps) ? gaps : [],
       })
+      setRawTranscriptDraft(text ?? '')
 
       // Expand to word-level segments for the interactive editor.
       // ALWAYS start with expanded word list from sentence segments to ensure complete coverage.
@@ -407,7 +657,7 @@ export default function LyricVideoWizard({
       }
 
       const firstLyricStart = Number.isFinite(firstTimedSegment?.start) ? firstTimedSegment.start : 0
-      const lyricLines = buildLyricLinesFromWords(words, firstLyricStart)
+      const lyricLines = buildLyricLinesFromWordsLocal(words, firstLyricStart)
 
       // Safety net — if no segments/words were produced at all
       if (lyricLines.filter(l => l.text).length === 0) {
@@ -431,10 +681,11 @@ export default function LyricVideoWizard({
       setLines([{ id: uid(), start: 0, end: 4, text: 'Transcription parse error — edit manually', durationMs: 4000 }])
       setStep(2)
     }
-  }, [buildLyricLinesFromWords, isLyricCandidate])
+  }, [buildLyricLinesFromWordsLocal, isLyricCandidate])
 
   const handleRetryOpeningSection = useCallback(async () => {
     if (!audioUrl) return
+    if (!confirmLocalProHeavyRun(transcribePreset, 'Retry opening section')) return
     try {
       const res = await transcribe(audioUrl, {
         audioFilePath: audioSourcePath || undefined,
@@ -442,6 +693,7 @@ export default function LyricVideoWizard({
         selectedPreset: transcribePreset.selectedPreset,
         engineIntent: transcribePreset.engineIntent,
         resolvedEngine: transcribePreset.resolvedEngine,
+        localProOptions: transcribePreset.localProOptions,
         wordTimestamps: true,
         transcriptionMode: transcribePreset.transcriptionMode || 'lyric-vocal-focus',
         openingSectionOnly: true,
@@ -452,10 +704,11 @@ export default function LyricVideoWizard({
     } catch (err) {
       setOpeningLyricsWarning(`Opening retry failed: ${err?.message || String(err)}`)
     }
-  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribePreset.engineIntent, transcribePreset.modelId, transcribePreset.resolvedEngine, transcribePreset.selectedPreset, transcribePreset.transcriptionMode, transcribeResult.chunks])
+  }, [audioUrl, audioSourcePath, confirmLocalProHeavyRun, dedupeMergedSegments, handleTranscribeResult, transcribePreset, transcribeResult.chunks])
 
   const handleRetrySelectedSection = useCallback(async () => {
     if (!audioUrl) return
+    if (!confirmLocalProHeavyRun(transcribePreset, 'Retry selected section')) return
     const startInput = window.prompt('Retry section start (seconds):', '0')
     const endInput = window.prompt('Retry section end (seconds):', '45')
     const start = Number(startInput)
@@ -468,6 +721,7 @@ export default function LyricVideoWizard({
         selectedPreset: transcribePreset.selectedPreset,
         engineIntent: transcribePreset.engineIntent,
         resolvedEngine: transcribePreset.resolvedEngine,
+        localProOptions: transcribePreset.localProOptions,
         wordTimestamps: true,
         transcriptionMode: transcribePreset.transcriptionMode || 'lyric-vocal-focus',
         sectionStartSec: start,
@@ -478,7 +732,7 @@ export default function LyricVideoWizard({
     } catch (err) {
       setOpeningLyricsWarning(`Section retry failed: ${err?.message || String(err)}`)
     }
-  }, [audioUrl, audioSourcePath, dedupeMergedSegments, handleTranscribeResult, transcribePreset.engineIntent, transcribePreset.modelId, transcribePreset.resolvedEngine, transcribePreset.selectedPreset, transcribePreset.transcriptionMode, transcribeResult.chunks])
+  }, [audioUrl, audioSourcePath, confirmLocalProHeavyRun, dedupeMergedSegments, handleTranscribeResult, transcribePreset, transcribeResult.chunks])
 
   // ── Step 2 "Paste & Sync" — align pasted lyrics to audio ──────────────────
 
@@ -490,12 +744,17 @@ export default function LyricVideoWizard({
     try {
       let whisperWords = []
       if (audioUrl) {
+        if (!confirmLocalProHeavyRun(pasteSyncPreset, 'Paste & Sync pre-transcription')) {
+          setPasteAlignStatus('Cancelled before run. Choose Balanced or Fast for better stability.')
+          return
+        }
         const res = await transcribe(audioUrl, {
           audioFilePath: audioSourcePath || undefined,
           model: pasteSyncPreset.modelId,
           selectedPreset: pasteSyncPreset.selectedPreset,
           engineIntent: pasteSyncPreset.engineIntent,
           resolvedEngine: pasteSyncPreset.resolvedEngine,
+          localProOptions: pasteSyncPreset.localProOptions,
           wordTimestamps: true,
           transcriptionMode: pasteSyncPreset.transcriptionMode || 'lyric-vocal-focus',
           onModelProgress: (p) => {
@@ -521,7 +780,7 @@ export default function LyricVideoWizard({
     } finally {
       setPasteAligning(false)
     }
-  }, [audioUrl, audioSourcePath, pasteSyncPreset.engineIntent, pasteSyncPreset.modelId, pasteSyncPreset.resolvedEngine, pasteSyncPreset.selectedPreset, pasteSyncPreset.transcriptionMode, pasteText])
+  }, [audioUrl, audioSourcePath, confirmLocalProHeavyRun, pasteSyncPreset, pasteText])
 
   // ── Step 3 offline translation ─────────────────────────────────────────────
 
@@ -615,22 +874,36 @@ export default function LyricVideoWizard({
   // ── Timing helpers (Step 3) ───────────────────────────────────────────────
 
   /** Seek audio to a given time */
-  const seekTo = (t) => { if (step3AudioRef.current) step3AudioRef.current.currentTime = t }
+  const seekTo = useCallback((t) => {
+    if (step3AudioRef.current) step3AudioRef.current.currentTime = t
+  }, [])
 
   /** Stamp current audio time as a line's start — ripples to previous line's end */
-  const setLineStartNow = (idx) => {
+  const setLineStartNow = useCallback((idx) => {
     const t = Math.round((step3AudioRef.current?.currentTime ?? 0) * 100) / 100
     updateLine(idx, 'start', t, true)
-  }
+  }, [updateLine])
 
   /** Stamp current audio time as a line's end — ripples to next line's start */
-  const setLineEndNow = (idx) => {
+  const setLineEndNow = useCallback((idx) => {
     const t = Math.round((step3AudioRef.current?.currentTime ?? 0) * 100) / 100
     updateLine(idx, 'end', t, true)
-  }
+  }, [updateLine])
+
+  /** Stamp end time and advance to next row for rapid live timing */
+  const setLineEndNowAdvance = useCallback((idx) => {
+    const audio = step3AudioRef.current
+    const isPlaying = !!audio && !audio.paused
+    setLineEndNow(idx)
+    const nextIdx = idx + 1
+    if (nextIdx < lines.length) {
+      setSelectedRowIndex(nextIdx)
+    }
+    if (isPlaying) audio?.play?.().catch(() => {})
+  }, [lines, setLineEndNow])
 
   /** Split a line at the current audio time, distributing words across both halves */
-  const splitLineNow = (idx) => {
+  const splitLineNow = useCallback((idx) => {
     const t = Math.round((step3AudioRef.current?.currentTime ?? 0) * 100) / 100
     const line = lines[idx]
     if (!line) return
@@ -645,19 +918,7 @@ export default function LyricVideoWizard({
       )
       return copy
     })
-  }
-
-  /** Insert a blank line after `afterIdx`, starting at the current audio time */
-  const insertLineAfterNow = (afterIdx) => {
-    const t = Math.round((step3AudioRef.current?.currentTime ?? 0) * 100) / 100
-    const nextStart = lines[afterIdx + 1]?.start ?? (t + 4)
-    const endT = Math.max(t + 0.5, nextStart)
-    setLines(prev => {
-      const copy = [...prev]
-      copy.splice(afterIdx + 1, 0, { id: uid(), start: t, end: endT, text: '', durationMs: Math.round((endT - t) * 1000) })
-      return copy
-    })
-  }
+  }, [lines])
 
   /** Move a line up or down in the list (does NOT re-sort by time — use Sort button for that) */
   const moveLine = (idx, dir) => {
@@ -680,6 +941,134 @@ export default function LyricVideoWizard({
       return l
     }))
   }
+
+  const toggleLiveTimingMode = useCallback(() => {
+    const next = !liveTimingMode
+    setLiveTimingMode(next)
+    if (!next) return
+    const audio = step3AudioRef.current
+    if (!audio) return
+    const start = Number(lines[selectedRowIndex]?.start)
+    if (Number.isFinite(start)) audio.currentTime = start
+    audio.play?.().catch(() => {})
+  }, [lines, liveTimingMode, selectedRowIndex])
+
+  // In live mode, keep selected row tracking current playback position.
+  useEffect(() => {
+    if (step !== 2 || !liveTimingMode || !lines.length) return
+    const idx = lines.findIndex((l, i) => {
+      const start = Number(l?.start)
+      const end = Number(l?.end)
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return false
+      if (i === lines.length - 1) return audioTime >= start && audioTime <= (end + 0.25)
+      return audioTime >= start && audioTime < end
+    })
+    if (idx >= 0 && idx !== selectedRowIndex) {
+      setSelectedRowIndex(idx)
+    }
+  }, [audioTime, lines, liveTimingMode, selectedRowIndex, step])
+
+  // Follow the selected row in view while live timing.
+  useEffect(() => {
+    if (step !== 2 || !liveTimingMode) return
+    const row = rowRefs.current[selectedRowIndex]
+    row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [liveTimingMode, selectedRowIndex, step])
+
+  // Step 3 keyboard shortcuts for fast timing, ignored while typing in form fields.
+  useEffect(() => {
+    if (step !== 2) return
+
+    const isTypingTarget = (el) => {
+      if (!el || !(el instanceof HTMLElement)) return false
+      const tag = el.tagName
+      return el.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON'
+    }
+
+    const onKeyDown = (e) => {
+      if (isTypingTarget(/** @type {EventTarget|null} */ (e.target))) return
+      if (!lines.length) return
+      const idx = Math.max(0, Math.min(selectedRowIndex, lines.length - 1))
+      const audio = step3AudioRef.current
+
+      if (e.code === 'Space') {
+        e.preventDefault()
+        if (!audio) return
+        if (audio.paused) audio.play?.().catch(() => {})
+        else audio.pause?.()
+        return
+      }
+
+      const key = e.key.toLowerCase()
+      if (key === 's') {
+        e.preventDefault()
+        setLineStartNow(idx)
+        return
+      }
+      if (key === 'e') {
+        e.preventDefault()
+        setLineEndNowAdvance(idx)
+        return
+      }
+      if (key === 'x') {
+        e.preventDefault()
+        splitLineNow(idx)
+        return
+      }
+      if (key === 'm') {
+        e.preventDefault()
+        if (idx >= lines.length - 1) return
+        const line = lines[idx]
+        const next = lines[idx + 1]
+        const merged = `${String(line?.text || '').trim()} ${String(next?.text || '').trim()}`.trim()
+        setLines((prev) => {
+          const out = [...prev]
+          out[idx] = {
+            ...out[idx],
+            text: merged,
+            end: out[idx + 1].end,
+            durationMs: Math.round((out[idx + 1].end - out[idx].start) * 1000),
+          }
+          out.splice(idx + 1, 1)
+          return out
+        })
+        return
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedRowIndex((prev) => Math.max(0, prev - 1))
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedRowIndex((prev) => Math.min(lines.length - 1, prev + 1))
+        return
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        const line = lines[idx]
+        if (!line) return
+        const start = Math.max(0, Math.round((line.start - 0.1) * 10) / 10)
+        const duration = Math.max(0.1, Number(line.end) - Number(line.start))
+        updateLine(idx, 'start', start, false)
+        updateLine(idx, 'end', Math.max(start + 0.1, Math.round((start + duration) * 10) / 10), false)
+        return
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        const line = lines[idx]
+        if (!line) return
+        const start = Math.round((line.start + 0.1) * 10) / 10
+        const duration = Math.max(0.1, Number(line.end) - Number(line.start))
+        updateLine(idx, 'start', start, false)
+        updateLine(idx, 'end', Math.round((start + duration) * 10) / 10, false)
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [lines, selectedRowIndex, setLineEndNowAdvance, setLineStartNow, splitLineNow, step, updateLine])
 
   // ── Step 4: Background media (images + videos) ────────────────────────────
 
@@ -1214,6 +1603,7 @@ export default function LyricVideoWizard({
                         Preset: {transcribePreset.selectedPreset} | Intent: {transcribePreset.engineIntent} | Resolved engine: {transcribePreset.resolvedEngine} | Model: {transcribePreset.modelId}
                       </div>
                       {transcribePreset.selectedPreset === 'local-pro' && renderLocalProDetails()}
+                      {transcribePreset.selectedPreset === 'local-pro' && renderLocalProRuntimeControls()}
                     </details>
                   </div>
                   {whisperAvailable === false && (
@@ -1224,12 +1614,14 @@ export default function LyricVideoWizard({
                   {whisperAvailable !== false && (
                     <WhisperPanel
                       audioUrl={audioUrl}
+                      audioFilePath={audioSourcePath}
                       audioName={audioName}
                       modelIdOverride={transcribePreset.modelId}
                       hideModelSelector={true}
                       selectedPreset={transcribePreset.selectedPreset}
                       engineIntent={transcribePreset.engineIntent}
                       resolvedEngine={transcribePreset.resolvedEngine}
+                      localProOptions={transcribePreset.localProOptions}
                       transcriptionMode={transcribePreset.transcriptionMode || 'lyric-vocal-focus'}
                       onTranscribeComplete={handleTranscribeResult}
                       onInsertText={() => {}}
@@ -1278,6 +1670,7 @@ export default function LyricVideoWizard({
                         Preset: {pasteSyncPreset.selectedPreset} | Intent: {pasteSyncPreset.engineIntent} | Resolved engine: {pasteSyncPreset.resolvedEngine} | Model: {pasteSyncPreset.modelId}
                       </div>
                       {pasteSyncPreset.selectedPreset === 'local-pro' && renderLocalProDetails()}
+                      {pasteSyncPreset.selectedPreset === 'local-pro' && renderLocalProRuntimeControls()}
                     </details>
                   </div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1335,13 +1728,14 @@ export default function LyricVideoWizard({
             <div style={S.stepBody}>
               <h3 style={S.stepTitle}>Timing Editor — {lines.length} lyric lines</h3>
 
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                 <button onClick={() => setEditDebugTab('lyric-lines')} style={{ ...S.secondaryBtn, background: editDebugTab === 'lyric-lines' ? 'var(--bg3,#2a2a3e)' : undefined }}>Lyric lines tab</button>
                 <button onClick={() => setEditDebugTab('timed-segments')} style={{ ...S.secondaryBtn, background: editDebugTab === 'timed-segments' ? 'var(--bg3,#2a2a3e)' : undefined }}>Timed segments tab</button>
                 <button onClick={() => setEditDebugTab('raw-transcript')} style={{ ...S.secondaryBtn, background: editDebugTab === 'raw-transcript' ? 'var(--bg3,#2a2a3e)' : undefined }}>Raw transcript tab</button>
+                <span style={{ borderLeft: '1px solid var(--border,#444)', alignSelf: 'stretch', marginLeft: 2 }} />
                 <button onClick={handleRetryOpeningSection} style={S.secondaryBtn}>Retry opening section</button>
                 <button onClick={handleRetrySelectedSection} style={S.secondaryBtn}>Retry selected section</button>
-                <button onClick={() => { setSyncMode('paste'); setStep(1) }} style={S.secondaryBtn}>Paste correct lyrics and sync</button>
+                <button onClick={() => { setSyncMode('paste'); setStep(1) }} style={S.secondaryBtn}>Paste correct lyrics &amp; sync</button>
                 <button onClick={() => setStep3View('table')} style={S.secondaryBtn}>Tap sync manually</button>
               </div>
 
@@ -1389,8 +1783,42 @@ export default function LyricVideoWizard({
                 </div>
               )}
 
+              {/* ── Line style preset selector ── */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--t2,#aab)', whiteSpace: 'nowrap' }}>Line style:</span>
+                <select
+                  value={lyricLineStyle}
+                  onChange={e => setLyricLineStyle(e.target.value)}
+                  style={{ fontSize: 11, padding: '2px 6px', background: 'var(--bg2,#1a1a2e)', color: 'var(--t1,#eee)', border: '1px solid var(--border,#444)', borderRadius: 4, cursor: 'pointer' }}
+                >
+                  {Object.entries(LYRIC_LINE_STYLE_PRESETS).map(([key, p]) => (
+                    <option key={key} value={key}>
+                      {p.label}{previewLineCounts[key] != null ? ` (${previewLineCounts[key]} lines)` : ''}
+                    </option>
+                  ))}
+                </select>
+                {lines.length > 0 && (
+                  <span style={{ fontSize: 10, color: '#7dd3fc', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                    {lines.length} lines
+                  </span>
+                )}
+                <button
+                  onClick={() => {
+                    const rebuilt = rebuildFromWordSegments(wordSegments, 'line-style-apply')
+                    if (rebuilt.length > 0) setLines(rebuilt)
+                  }}
+                  disabled={wordSegments.length === 0}
+                  style={{ ...S.secondaryBtn, opacity: wordSegments.length ? 1 : 0.5 }}
+                >
+                  Apply style to lines
+                </button>
+                <span style={{ fontSize: 10, color: 'var(--t3,#888)', fontStyle: 'italic' }}>
+                  Use Karaoke Tight for music lyric videos. Use Subtitle for spoken narration.
+                </span>
+              </div>
+
               {/* ── View toggle tabs ── */}
-              <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                 {/** @type {('table'|'timeline')[]} */ (['table', 'timeline']).map(v => (
                   <button
                     key={v}
@@ -1406,9 +1834,22 @@ export default function LyricVideoWizard({
                       fontWeight: step3View === v ? 700 : 400,
                     }}
                   >
-                    {v === 'table' ? '📋 Table' : '📅 Timeline'}
+                    {v === 'table' ? 'Simple' : 'Timeline'}
                   </button>
                 ))}
+                <button
+                  onClick={toggleLiveTimingMode}
+                  style={{
+                    ...S.secondaryBtn,
+                    background: liveTimingMode ? 'rgba(22,163,74,.28)' : 'var(--bg3,#2a2a3e)',
+                    borderColor: liveTimingMode ? 'rgba(74,222,128,.8)' : 'var(--border,#444)',
+                    color: liveTimingMode ? '#dcfce7' : 'var(--t2,#ccc)',
+                    fontWeight: 700,
+                  }}
+                  title="Live timing keyboard-first mode"
+                >
+                  {liveTimingMode ? 'Stop Live Timing' : 'Start Live Timing'}
+                </button>
               </div>
 
               {/* ── Audio timing controller ── */}
@@ -1430,23 +1871,23 @@ export default function LyricVideoWizard({
                     </button>
                   </div>
                   <p style={{ ...S.hint, margin: 0 }}>
-                    💡 Play audio then click <strong>◉S</strong> / <strong>◉E</strong> to stamp Start / End timing for any line. <strong>Click a Start time</strong> to seek. <strong>✂</strong> splits a line at the current position.
+                    💡 Live Timing Mode: keep audio playing and press <strong>E</strong> to set End and auto-advance. Press <strong>S</strong> to stamp Start.
                   </p>
                 </div>
               )}
 
               {/* ── Timing table ── */}
               {step3View === 'table' && (
-              <div style={{ maxHeight: 380, overflowY: 'auto', border: '1px solid var(--border,#333)', borderRadius: 4 }}>
+              <div style={{ maxHeight: 380, overflowY: 'auto', overflowX: 'hidden', border: '1px solid var(--border,#333)', borderRadius: 4 }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, tableLayout: 'fixed' }}>
                   <colgroup>
                     <col style={{ width: 26 }} />
-                    <col style={{ width: 58 }} />
-                    <col style={{ width: 24 }} />
-                    <col style={{ width: 58 }} />
-                    <col style={{ width: 24 }} />
+                    <col style={{ width: 62 }} />
+                    <col style={{ width: 26 }} />
+                    <col style={{ width: 62 }} />
+                    <col style={{ width: 26 }} />
                     <col />
-                    <col style={{ width: 130 }} />
+                    <col style={{ width: 176 }} />
                   </colgroup>
                   <thead>
                     <tr style={{ background: 'var(--bg2,#222)', position: 'sticky', top: 0, zIndex: 1 }}>
@@ -1470,16 +1911,34 @@ export default function LyricVideoWizard({
                             : !line.text
                               ? 'rgba(99,102,241,0.07)'
                               : i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,.02)',
-                          outline: isPlaying ? '2px solid #f59e0b' : 'none',
+                          outline: liveTimingMode && selectedRowIndex === i
+                            ? '2px solid #22d3ee'
+                            : (isPlaying ? '2px solid #f59e0b' : 'none'),
                           outlineOffset: -1,
-                        }}>
-                          <td style={{ ...S.td, fontWeight: 700, color: isPlaying ? '#f59e0b' : 'var(--t3,#888)', textAlign: 'center' }}>{i + 1}</td>
+                          cursor: 'pointer',
+                        }} ref={(el) => { rowRefs.current[i] = el }}>
+                          <td
+                            style={{
+                              ...S.td,
+                              fontWeight: 700,
+                              color: isPlaying ? '#f59e0b' : 'var(--t3,#888)',
+                              textAlign: 'center',
+                              background: selectedRowIndex === i
+                                ? (liveTimingMode ? 'rgba(34,211,238,.22)' : 'rgba(34,211,238,.12)')
+                                : undefined,
+                            }}
+                            onClick={() => setSelectedRowIndex(i)}
+                            title="Select row"
+                          >
+                            {i + 1}
+                          </td>
                           <td style={S.td}>
                             <input
                               type="number" min={0} step={0.1}
                               value={line.start.toFixed(1)}
                               onChange={(e) => updateLine(i, 'start', parseFloat(e.target.value) || 0, true)}
                               onFocus={() => seekTo(line.start)}
+                              onClick={() => setSelectedRowIndex(i)}
                               title={`Click to seek audio to ${formatTime(line.start)}`}
                               style={{ ...S.numInput, cursor: 'pointer', width: '100%', borderColor: isPlaying ? '#f59e0b' : undefined }}
                             />
@@ -1487,63 +1946,81 @@ export default function LyricVideoWizard({
                           <td style={S.td}>
                             <button
                               onClick={() => setLineStartNow(i)}
-                              style={{ ...S.iconBtn, color: '#f59e0b', fontWeight: 700 }}
-                              title={`Set start = ${formatTime(audioTime)}`}
-                            >◉</button>
+                              style={{ ...S.iconBtnSm, color: '#f59e0b', fontWeight: 700 }}
+                              title="Set start to current playhead time"
+                            >S</button>
                           </td>
                           <td style={S.td}>
                             <input
                               type="number" min={0} step={0.1}
                               value={line.end.toFixed(1)}
                               onChange={(e) => updateLine(i, 'end', parseFloat(e.target.value) || 0, true)}
+                              onClick={() => setSelectedRowIndex(i)}
                               style={{ ...S.numInput, width: '100%' }}
                             />
                           </td>
                           <td style={S.td}>
                             <button
-                              onClick={() => setLineEndNow(i)}
-                              style={{ ...S.iconBtn, color: '#f59e0b', fontWeight: 700 }}
-                              title={`Set end = ${formatTime(audioTime)}`}
-                            >◉</button>
+                              onClick={() => setLineEndNowAdvance(i)}
+                              style={{ ...S.iconBtnSm, color: '#f59e0b', fontWeight: 700 }}
+                              title="Set end to current playhead time and auto-advance"
+                            >E</button>
                           </td>
                           <td style={S.td}>
                             <input
                               type="text"
                               value={line.text}
                               onChange={(e) => updateLine(i, 'text', e.target.value)}
+                              onClick={() => setSelectedRowIndex(i)}
+                              onFocus={(e) => { e.currentTarget.style.borderColor = '#22d3ee' }}
+                              onBlur={(e) => { e.currentTarget.style.borderColor = '#2f3b55' }}
                               placeholder="(instrumental — blank = ♪ page)"
-                              style={{ ...S.numInput, width: '100%', fontStyle: line.text ? 'normal' : 'italic', color: line.text ? undefined : 'var(--t3,#666)' }}
+                              style={{ ...S.lyricTextInput, fontStyle: line.text ? 'normal' : 'italic', color: line.text ? '#ffffff' : '#b8c2d8' }}
                             />
                           </td>
-                          <td style={{ ...S.td, whiteSpace: 'nowrap' }}>
-                            <button onClick={() => { seekTo(line.start); step3AudioRef.current?.play?.().catch(() => {}) }} style={S.iconBtn} title="Play from line start">▶</button>
-                            <button onClick={() => updateLine(i, 'start', Math.max(0, Math.round((line.start - 0.1) * 10) / 10), true)} style={S.iconBtn} title="Nudge start -0.1s">S-</button>
-                            <button onClick={() => updateLine(i, 'start', Math.round((line.start + 0.1) * 10) / 10, true)} style={S.iconBtn} title="Nudge start +0.1s">S+</button>
-                            <button onClick={() => updateLine(i, 'end', Math.max(line.start + 0.1, Math.round((line.end - 0.1) * 10) / 10), true)} style={S.iconBtn} title="Nudge end -0.1s">E-</button>
-                            <button onClick={() => updateLine(i, 'end', Math.round((line.end + 0.1) * 10) / 10, true)} style={S.iconBtn} title="Nudge end +0.1s">E+</button>
-                            <button onClick={() => splitLineNow(i)} style={S.iconBtn} title="Split line at current audio time">✂</button>
-                            <button
-                              onClick={() => {
-                                if (i >= lines.length - 1) return
-                                const merged = `${String(line.text || '').trim()} ${String(lines[i + 1]?.text || '').trim()}`.trim()
-                                setLines(prev => {
-                                  const out = [...prev]
-                                  out[i] = { ...out[i], text: merged, end: out[i + 1].end, durationMs: Math.round((out[i + 1].end - out[i].start) * 1000) }
-                                  out.splice(i + 1, 1)
-                                  return out
-                                })
-                              }}
-                              style={S.iconBtn}
-                              title="Merge with next"
-                            >
-                              ⇄
-                            </button>
-                            <button onClick={() => updateLine(i, 'text', '[instrumental]')} style={S.iconBtn} title="Mark as instrumental">♪</button>
-                            <button onClick={() => updateLine(i, 'text', '[POSSIBLE MISSING VOCAL SECTION]')} style={S.iconBtn} title="Mark as missing vocal section">?</button>
-                            <button onClick={() => moveLine(i, -1)} disabled={i === 0} style={{ ...S.iconBtn, opacity: i === 0 ? 0.3 : 1 }} title="Move up">↑</button>
-                            <button onClick={() => moveLine(i, 1)} disabled={i === lines.length - 1} style={{ ...S.iconBtn, opacity: i === lines.length - 1 ? 0.3 : 1 }} title="Move down">↓</button>
-                            <button onClick={() => insertLineAfterNow(i)} style={{ ...S.iconBtn, color: '#4ade80' }} title={`Insert blank line after this one at ⏱ ${formatTime(audioTime)}`}>＋</button>
-                            <button onClick={() => deleteLine(i)} style={{ ...S.iconBtn, color: '#e74c3c' }} title="Delete line">✕</button>
+                          <td style={{ ...S.td, padding: '2px 3px' }}>
+                            <div style={{ display: 'flex', gap: 2, alignItems: 'center', whiteSpace: 'nowrap' }}>
+                              <button onClick={() => { seekTo(line.start); step3AudioRef.current?.play?.().catch(() => {}) }} style={S.iconBtnSm} title="Play line">▶</button>
+                              <button onClick={() => splitLineNow(i)} style={S.iconBtnSm} title="Split at current playhead">✂</button>
+                              <button
+                                onClick={() => {
+                                  if (i >= lines.length - 1) return
+                                  const merged = `${String(line.text || '').trim()} ${String(lines[i + 1]?.text || '').trim()}`.trim()
+                                  setLines((prev) => {
+                                    const out = [...prev]
+                                    out[i] = { ...out[i], text: merged, end: out[i + 1].end, durationMs: Math.round((out[i + 1].end - out[i].start) * 1000) }
+                                    out.splice(i + 1, 1)
+                                    return out
+                                  })
+                                }}
+                                style={S.iconBtnSm}
+                                title="Merge with next"
+                              >Merge</button>
+                              <button
+                                onClick={() => {
+                                  const start = Math.max(0, Math.round((line.start - 0.1) * 10) / 10)
+                                  const duration = Math.max(0.1, line.end - line.start)
+                                  updateLine(i, 'start', start, false)
+                                  updateLine(i, 'end', Math.max(start + 0.1, Math.round((start + duration) * 10) / 10), false)
+                                }}
+                                style={S.iconBtnSm}
+                                title="Nudge whole line earlier by 0.1s"
+                              >-0.1</button>
+                              <button
+                                onClick={() => {
+                                  const start = Math.round((line.start + 0.1) * 10) / 10
+                                  const duration = Math.max(0.1, line.end - line.start)
+                                  updateLine(i, 'start', start, false)
+                                  updateLine(i, 'end', Math.round((start + duration) * 10) / 10, false)
+                                }}
+                                style={S.iconBtnSm}
+                                title="Nudge whole line later by 0.1s"
+                              >+0.1</button>
+                              <span style={{ width: 1, alignSelf: 'stretch', background: 'rgba(255,255,255,.18)' }} />
+                              <button onClick={() => moveLine(i, -1)} disabled={i === 0} style={{ ...S.iconBtnXs, opacity: i === 0 ? 0.25 : 0.62 }} title="Move up">↑</button>
+                              <button onClick={() => moveLine(i, 1)} disabled={i === lines.length - 1} style={{ ...S.iconBtnXs, opacity: i === lines.length - 1 ? 0.25 : 0.62 }} title="Move down">↓</button>
+                              <button onClick={() => deleteLine(i)} style={{ ...S.iconBtnXs, color: '#ef4444', opacity: 0.72 }} title="Delete line">×</button>
+                            </div>
                           </td>
                         </tr>
                       )
@@ -1578,26 +2055,12 @@ export default function LyricVideoWizard({
                     />
                     <button
                       onClick={() => {
-                        const WORDS_PER_PAGE = 8
-                        const GAP_THRESHOLD_S = 3
-                        const rebuilt = []
-                        let wi = 0
-                        while (wi < wordSegments.length) {
-                          const prevEnd = wi > 0 ? wordSegments[wi - 1].end : 0
-                          const thisStart = wordSegments[wi].start ?? prevEnd
-                          if (thisStart - prevEnd > GAP_THRESHOLD_S) {
-                            rebuilt.push({ id: uid(), start: prevEnd, end: thisStart, text: '', durationMs: Math.round((thisStart - prevEnd) * 1000) })
-                          }
-                          const group = wordSegments.slice(wi, wi + WORDS_PER_PAGE)
-                          const txt = group.map(w => String(w.text || '').replace(/^\s+/, '')).join(' ').trim()
-                          if (txt) rebuilt.push({ id: uid(), start: group[0].start ?? 0, end: group[group.length - 1].end ?? 0, text: txt, durationMs: Math.round(((group[group.length - 1].end ?? 0) - (group[0].start ?? 0)) * 1000) })
-                          wi += WORDS_PER_PAGE
-                        }
-                        if (rebuilt.filter(l => l.text).length > 0) setLines(rebuilt)
+                        const rebuilt = rebuildFromWordSegments(wordSegments, 'word-editor-rebuild')
+                        if (rebuilt.length > 0) setLines(rebuilt)
                       }}
                       style={{ ...S.secondaryBtn, fontSize: 11, alignSelf: 'flex-start' }}
                     >
-                      🔄 Rebuild pages from word edits
+                      🔄 Rebuild lyric lines
                     </button>
                   </div>
                 </details>
@@ -1611,7 +2074,8 @@ export default function LyricVideoWizard({
                   </summary>
                   <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <textarea
-                      defaultValue={transcribeResult.text}
+                      value={rawTranscriptDraft}
+                      onChange={(e) => setRawTranscriptDraft(e.target.value)}
                       id="raw-transcript-ta"
                       rows={5}
                       style={{ ...S.textarea, fontSize: 11, fontFamily: 'monospace' }}
@@ -1619,18 +2083,14 @@ export default function LyricVideoWizard({
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button
                         onClick={() => {
-                          const ta = /** @type {HTMLTextAreaElement|null} */ (document.getElementById('raw-transcript-ta'))
-                          const txt = ta?.value ?? transcribeResult.text
-                          const sentences = txt.trim().split(/(?<=[.!?,;])\s+|\n+/).map(s => s.trim()).filter(Boolean)
-                          if (!sentences.length) return
-                          setLines(sentences.map((s, idx) => ({ id: uid(), start: idx * 4, end: (idx + 1) * 4, text: s, durationMs: 4000 })))
+                          reparseRawTranscript(rawTranscriptDraft)
                         }}
                         style={S.actionBtn}
                       >
-                        🔄 Re-parse as lyric pages
+                        🔄 Re-parse as lyric pages ({(LYRIC_LINE_STYLE_PRESETS[lyricLineStyle] ?? LYRIC_LINE_STYLE_PRESETS.balanced).label})
                       </button>
                       <span style={{ fontSize: 10, color: 'var(--t3,#888)', alignSelf: 'center' }}>
-                        Splits at sentence punctuation.
+                        Rebuilds table, timed preview, and word editor from one source.
                       </span>
                     </div>
 
@@ -1939,7 +2399,7 @@ const S = {
   },
   modal: {
     background: 'var(--bg1, #16161e)', border: '1px solid var(--border, #333)',
-    borderRadius: 10, width: 660, maxWidth: '95vw', maxHeight: '90vh',
+    borderRadius: 10, width: 'min(1200px, 92vw)', maxHeight: '92vh',
     display: 'flex', flexDirection: 'column', boxShadow: '0 16px 60px rgba(0,0,0,.6)',
     color: 'var(--t1, #eee)', overflow: 'hidden',
   },
@@ -1958,8 +2418,8 @@ const S = {
     border: 'none', borderRadius: 4, padding: '4px 10px', fontSize: 11,
     cursor: 'pointer', fontWeight: 600, transition: 'background 0.15s', whiteSpace: 'nowrap',
   },
-  body: { flex: 1, overflowY: 'auto', padding: 16 },
-  stepBody: { display: 'flex', flexDirection: 'column', gap: 12 },
+  body: { flex: 1, overflow: 'hidden', padding: 16, minHeight: 0, display: 'flex', flexDirection: 'column' },
+  stepBody: { display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, paddingRight: 4 },
   stepTitle: { margin: 0, fontSize: 15, fontWeight: 700, color: 'var(--t1, #eee)' },
   hint: { fontSize: 11, color: 'var(--t3, #888)', margin: 0 },
   actionBtn: {
@@ -1978,13 +2438,43 @@ const S = {
     border: 'none', borderRadius: 3, padding: '2px 5px', cursor: 'pointer', fontSize: 12,
     color: 'var(--t2,#ccc)', background: 'var(--bg3,#2a2a3e)', lineHeight: 1,
   },
-  footer: { display: 'flex', gap: 8, justifyContent: 'flex-end', paddingTop: 8, borderTop: '1px solid var(--border, #333)' },
+  iconBtnSm: {
+    border: 'none', borderRadius: 2, padding: '0 3px', cursor: 'pointer', fontSize: 10,
+    color: 'var(--t2,#ccc)', background: 'var(--bg3,#2a2a3e)', lineHeight: 1,
+  },
+  iconBtnXs: {
+    border: 'none', borderRadius: 2, padding: '0 2px', cursor: 'pointer', fontSize: 9,
+    color: 'var(--t2,#ccc)', background: 'rgba(42,42,62,.8)', lineHeight: 1,
+  },
+  footer: {
+    display: 'flex',
+    gap: 8,
+    justifyContent: 'flex-end',
+    paddingTop: 8,
+    borderTop: '1px solid var(--border, #333)',
+    position: 'sticky',
+    bottom: 0,
+    background: 'var(--bg1, #16161e)',
+    zIndex: 2,
+  },
   fileLabel: { fontSize: 11, color: 'var(--t2, #ccc)' },
   th: { padding: '4px 6px', textAlign: 'left', fontWeight: 600, fontSize: 10, color: 'var(--t3, #888)' },
-  td: { padding: '3px 4px', fontSize: 11 },
+  td: { padding: '1px 3px', fontSize: 10 },
   numInput: {
     background: 'var(--bg3, #2a2a3e)', border: '1px solid var(--border, #333)',
-    color: 'var(--t1, #eee)', borderRadius: 2, padding: '1px 4px', fontSize: 10, width: 55,
+    color: '#ffffff', borderRadius: 2, padding: '1px 4px', fontSize: 10, width: 55,
+    WebkitTextFillColor: '#ffffff', opacity: 1,
+  },
+  lyricTextInput: {
+    width: '100%',
+    background: '#101522',
+    border: '1px solid #2f3b55',
+    color: '#ffffff',
+    WebkitTextFillColor: '#ffffff',
+    borderRadius: 3,
+    padding: '1px 5px',
+    fontSize: 10,
+    opacity: 1,
   },
   textarea: {
     width: '100%', background: 'var(--bg3, #2a2a3e)', border: '1px solid var(--border, #333)',

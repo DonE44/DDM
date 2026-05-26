@@ -15,13 +15,14 @@ export const TRANSCRIPTION_PRESETS = [
   {
     id: 'local-pro',
     label: 'Local Pro',
-    description: 'Future Demucs + Faster-Whisper quality path (not installed yet).',
+    description: 'Demucs + Faster-Whisper quality path (gated and setup-dependent).',
     engineIntent: 'quality-local-pro',
     preferredEngine: 'local-pro',
     fallbackEngine: 'fast-local',
     transcriptionMode: 'lyric-vocal-focus',
     requiresApiKey: false,
     requiresLocalTools: true,
+    runtimeEnabled: false,
   },
   {
     id: 'fast-local',
@@ -58,20 +59,98 @@ export const TRANSCRIPTION_PRESETS = [
   },
 ]
 
+export const LOCAL_PRO_PERFORMANCE_PROFILES = [
+  {
+    id: 'fast',
+    label: 'Fast',
+    model: 'small',
+    beamSize: 3,
+    vadFilter: true,
+    device: 'cpu',
+    computeType: 'int8',
+    estimatedRuntime: 'Fastest turnaround',
+    estimatedRam: '4-6 GB RAM',
+    heavyRisk: false,
+    experimental: false,
+  },
+  {
+    id: 'balanced',
+    label: 'Balanced',
+    model: 'medium',
+    beamSize: 5,
+    vadFilter: true,
+    device: 'cpu',
+    computeType: 'int8',
+    estimatedRuntime: 'Recommended default',
+    estimatedRam: '6-10 GB RAM',
+    heavyRisk: false,
+    experimental: false,
+  },
+  {
+    id: 'pro',
+    label: 'Pro Heavy',
+    model: 'large-v3',
+    beamSize: 5,
+    vadFilter: true,
+    device: 'cpu',
+    computeType: 'int8_float16',
+    estimatedRuntime: 'Longest runtime',
+    estimatedRam: '12-18 GB RAM',
+    heavyRisk: true,
+    experimental: false,
+  },
+  {
+    id: 'gpu',
+    label: 'Experimental GPU',
+    model: 'large-v3',
+    beamSize: 5,
+    vadFilter: true,
+    device: 'cuda',
+    computeType: 'float16',
+    estimatedRuntime: 'Potentially fastest when CUDA is healthy',
+    estimatedRam: '8+ GB VRAM',
+    heavyRisk: true,
+    experimental: true,
+  },
+]
+
+export const DEFAULT_LOCAL_PRO_PROFILE_ID = 'balanced'
+
+export function getLocalProProfileById(profileId) {
+  return LOCAL_PRO_PERFORMANCE_PROFILES.find((profile) => profile.id === profileId)
+    || LOCAL_PRO_PERFORMANCE_PROFILES.find((profile) => profile.id === DEFAULT_LOCAL_PRO_PROFILE_ID)
+    || LOCAL_PRO_PERFORMANCE_PROFILES[0]
+}
+
 export const DEFAULT_TRANSCRIPTION_PRESET_ID = 'auto-best'
 
 export function getTranscriptionPresetById(id) {
   return TRANSCRIPTION_PRESETS.find((p) => p.id === id) || TRANSCRIPTION_PRESETS[0]
 }
 
+/**
+ * @param {{
+ *   presetId?: string,
+ *   hasWhisperCpp?: boolean,
+ *   hasLocalPro?: boolean,
+ *   localProRuntimeEnabled?: boolean,
+ *   localProSetupState?: string,
+ *   localProSetupHint?: string,
+ *   hasApiKey?: boolean,
+ *   hasElectronIPC?: boolean,
+ *   localProOptions?: any,
+ * }} [input]
+ */
 export function resolveTranscriptionPreset({
   presetId,
   hasWhisperCpp = false,
   hasLocalPro = false,
+  localProRuntimeEnabled = false,
   localProSetupState = 'Setup required',
   localProSetupHint = 'Local Pro setup required.',
   hasApiKey = false,
   hasElectronIPC = false,
+  localProOptions = null,
 } = {}) {
   const preset = getTranscriptionPresetById(presetId)
 
@@ -139,7 +218,46 @@ export function resolveTranscriptionPreset({
   }
 
   if (preset.id === 'local-pro') {
-    const localProReady = hasLocalPro && hasElectronIPC
+    const selectedProfile = getLocalProProfileById(localProOptions?.profileId)
+    const localProReady = hasLocalPro && hasElectronIPC && localProRuntimeEnabled
+    const localProFoundationReady = hasLocalPro && hasElectronIPC
+    const resolvedLocalProOptions = {
+      profileId: selectedProfile.id,
+      model: localProOptions?.model || selectedProfile.model,
+      useVocalIsolation: !!localProOptions?.useVocalIsolation,
+      beamSize: Number.isFinite(localProOptions?.beamSize)
+        ? Math.max(1, Math.min(10, localProOptions.beamSize))
+        : selectedProfile.beamSize,
+      vadFilter: typeof localProOptions?.vadFilter === 'boolean'
+        ? localProOptions.vadFilter
+        : selectedProfile.vadFilter,
+      device: localProOptions?.device || selectedProfile.device,
+      computeType: localProOptions?.computeType || selectedProfile.computeType,
+      allowFallbackOnFailure: localProOptions?.allowFallbackOnFailure === true,
+      languageMode: localProOptions?.languageMode === 'manual' ? 'manual' : 'auto',
+      language: String(localProOptions?.language || '').trim(),
+      initialPrompt: String(localProOptions?.initialPrompt || ''),
+    }
+
+    if (localProReady) {
+      return {
+        preset,
+        transcriptionMode: preset.transcriptionMode,
+        selectedPreset: preset.id,
+        modelId: 'Xenova/whisper-medium',
+        engineIntent: preset.engineIntent,
+        resolvedEngine: 'local-pro',
+        requiresApiKey: false,
+        requiresLocalTools: true,
+        available: true,
+        warning: '',
+        fallbackApplied: false,
+        runtimeEnabled: true,
+        localProOptions: resolvedLocalProOptions,
+        localProProfile: selectedProfile,
+      }
+    }
+
     return {
       preset,
       transcriptionMode: preset.transcriptionMode,
@@ -149,11 +267,14 @@ export function resolveTranscriptionPreset({
       resolvedEngine: 'xenova',
       requiresApiKey: false,
       requiresLocalTools: true,
-      available: localProReady,
-      warning: localProReady
-        ? 'Local Pro foundation is available, but runtime execution is not enabled yet in Phase 2A. Using Compatibility fallback.'
+      available: false,
+      warning: localProFoundationReady
+        ? 'Local Pro runtime is currently disabled. Using Compatibility fallback.'
         : `${localProSetupState}. ${localProSetupHint} Using Compatibility fallback.`,
       fallbackApplied: true,
+      runtimeEnabled: false,
+      localProOptions: resolvedLocalProOptions,
+      localProProfile: selectedProfile,
     }
   }
 

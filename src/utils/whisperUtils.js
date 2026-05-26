@@ -19,7 +19,7 @@
 
 /** @typedef {{ id: string, label: string, size: string, sizeBytes: number, description: string, electronOnly?: boolean, license?: string, commercialUse?: boolean, requiresApiKey?: boolean, service?: string }} WhisperModelInfo */
 /** @typedef {{ start: number, end: number, text: string }} WhisperSegment */
-/** @typedef {{ text: string, segments: WhisperSegment[], language: string, chunks?: unknown[], wordTimestamps?: WhisperSegment[], engine?: string, method?: string, model?: string, selectedPreset?: string|null, resolvedEngine?: string|null, warnings?: string[], gaps?: unknown[], containsGasoline?: boolean, containsFingers?: boolean, containsMatch?: boolean, ok?: boolean, error?: string }} WhisperResult */
+/** @typedef {{ text: string, segments: WhisperSegment[], language: string, chunks?: unknown[], wordTimestamps?: WhisperSegment[], engine?: string, method?: string, model?: string, selectedPreset?: string|null, resolvedEngine?: string|null, demucsUsed?: boolean, beamSize?: number|null, vadFilter?: boolean|null, localProTimings?: unknown, transcriptionDurationSec?: number|null, warnings?: string[], gaps?: unknown[], containsGasoline?: boolean, containsFingers?: boolean, containsMatch?: boolean, ok?: boolean, error?: string }} WhisperResult */
 
 /**
  * Xenova's published env type marks these flags readonly, but v2 expects apps to
@@ -121,6 +121,9 @@ export const DEFAULT_WHISPER_MODEL = 'Xenova/whisper-medium'
 export {
   TRANSCRIPTION_PRESETS,
   DEFAULT_TRANSCRIPTION_PRESET_ID,
+  LOCAL_PRO_PERFORMANCE_PROFILES,
+  DEFAULT_LOCAL_PRO_PROFILE_ID,
+  getLocalProProfileById,
   getTranscriptionPresetById,
   resolveTranscriptionPreset,
 } from './transcriptionPresets.js'
@@ -278,10 +281,23 @@ async function transcribeViaOpenAI(audioUrl, apiKey, opts = {}) {
  *   onModelProgress?: (p: object) => void,
  *   onTranscribeProgress?: (pct: number) => void,
  *   wordTimestamps?: boolean,
- *   transcriptionMode?: 'normal'|'lyric-vocal-focus',
+ *   transcriptionMode?: string,
  *   openingSectionOnly?: boolean,
  *   sectionStartSec?: number|null,
  *   sectionEndSec?: number|null,
+ *   localProOptions?: {
+ *     profileId?: string,
+ *     model?: string,
+ *     useVocalIsolation?: boolean,
+ *     beamSize?: number,
+ *     vadFilter?: boolean,
+ *     device?: string,
+ *     computeType?: string,
+ *     allowFallbackOnFailure?: boolean,
+ *     languageMode?: string,
+ *     language?: string,
+ *     initialPrompt?: string,
+ *   }|null,
  * }} [options]
  * @returns {Promise<WhisperResult>}
  */
@@ -300,6 +316,7 @@ export async function transcribe(audioUrl, options = {}) {
     openingSectionOnly = false,
     sectionStartSec = null,
     sectionEndSec = null,
+    localProOptions = null,
     apiKey,
     _retryCount = 0,
   } = options
@@ -320,7 +337,10 @@ export async function transcribe(audioUrl, options = {}) {
   const isLargeModel = LARGE_MODELS.includes(model)
   const shouldUseIPC = hasIPC && (isLargeModel || isEngineSelectionModel)
 
-  const engineSelection = isEngineSelectionModel ? model : 'xenova'
+  const isLocalProRuntime = String(selectedPreset || '').toLowerCase() === 'local-pro' && String(resolvedEngine || '').toLowerCase() === 'local-pro'
+  const engineSelection = isLocalProRuntime
+    ? 'local-pro'
+    : (isEngineSelectionModel ? model : 'xenova')
   const desiredModel = model === 'whispercpp-large' ? 'large' : 'medium'
   const modelIdForIPC = isEngineSelectionModel ? 'Xenova/whisper-medium' : model
   
@@ -356,6 +376,7 @@ export async function transcribe(audioUrl, options = {}) {
         selectedPreset,
         engineIntent,
         resolvedEngine,
+        localProOptions,
         modelId: modelIdForIPC,
         engineSelection,
         desiredModel,
@@ -406,6 +427,11 @@ export async function transcribe(audioUrl, options = {}) {
         model: result.model || modelIdForIPC,
         selectedPreset: (/** @type {any} */ (result))?.selectedPreset || selectedPreset || null,
         resolvedEngine: result.engine || resolvedEngine || null,
+        demucsUsed: !!result.demucsUsed,
+        beamSize: Number.isFinite(result.beamSize) ? result.beamSize : null,
+        vadFilter: typeof result.vadFilter === 'boolean' ? result.vadFilter : null,
+        localProTimings: result.localProTimings || null,
+        transcriptionDurationSec: Number.isFinite(result.transcriptionDurationSec) ? result.transcriptionDurationSec : null,
         warnings: Array.isArray(result.warnings) ? result.warnings : [],
         gaps: Array.isArray(result.gaps) ? result.gaps : [],
         containsGasoline: !!result.containsGasoline,
@@ -604,6 +630,129 @@ export function expandSentencesToWords(sentenceChunks) {
   return wordSegs
 }
 
+function normalizeLyricWordText(text) {
+  return String(text || '').replace(/^\s+/, '')
+}
+
+function joinLyricWords(words) {
+  return words
+    .map((word, index) => {
+      const text = normalizeLyricWordText(word?.text)
+      if (!text) return ''
+      if (index === 0) return text
+      return text
+    })
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+([,.:;!?…])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function isSentencePunctuation(wordText) {
+  return /[,.!?;:…]$/.test(normalizeLyricWordText(wordText))
+}
+
+function startsWithCapital(wordText) {
+  const text = normalizeLyricWordText(wordText)
+  return /^[A-Z]/.test(text)
+}
+
+/**
+ * Convert word timestamps into lyric-aware lines using pause, punctuation, duration,
+ * and capitalization heuristics.
+ *
+ * @param {{start:number,end:number,text:string}[]} words
+ * @param {{ maxChars?: number, maxDurationSec?: number, pauseBreakSec?: number, strongPauseBreakSec?: number, minWordsPerLine?: number }} [options]
+ * @returns {{ start: number, end: number, text: string, durationMs: number }[]}
+ */
+export function buildLyricLinesFromWords(words, options = {}) {
+  const {
+    maxChars = 42,
+    maxDurationSec = 4.5,
+    pauseBreakSec = 0.55,
+    strongPauseBreakSec = 0.9,
+    minWordsPerLine = 2,
+  } = options
+
+  const orderedWords = (Array.isArray(words) ? words : [])
+    .map((word) => ({
+      start: Number(word?.start),
+      end: Number(word?.end),
+      text: normalizeLyricWordText(word?.text),
+    }))
+    .filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.text)
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+
+  if (!orderedWords.length) return []
+
+  const lines = []
+  let current = []
+
+  const flushCurrent = () => {
+    if (!current.length) return
+    const text = joinLyricWords(current)
+    if (!text) {
+      current = []
+      return
+    }
+    const start = current[0].start
+    const end = current[current.length - 1].end
+    lines.push({
+      start: Math.round(start * 1000) / 1000,
+      end: Math.round(end * 1000) / 1000,
+      text,
+      durationMs: Math.round((end - start) * 1000),
+    })
+    current = []
+  }
+
+  const lineDurationSec = () => {
+    if (!current.length) return 0
+    return current[current.length - 1].end - current[0].start
+  }
+
+  const lineTextLength = () => joinLyricWords(current).length
+
+  for (let i = 0; i < orderedWords.length; i += 1) {
+    const word = orderedWords[i]
+    const prev = current[current.length - 1]
+    const pause = prev ? (word.start - prev.end) : 0
+    const strongPause = pause >= strongPauseBreakSec
+    const shouldProtectShortPhrase = current.length > 0 && current.length < minWordsPerLine && !strongPause
+
+    if (prev && !shouldProtectShortPhrase) {
+      const breakForPause = pause > pauseBreakSec
+      const breakForPunctuation = isSentencePunctuation(prev.text)
+      const breakForDuration = lineDurationSec() >= maxDurationSec
+      const breakForLength = lineTextLength() >= maxChars
+      const breakForCapital = startsWithCapital(word.text) && current.length >= 4
+
+      if (strongPause || breakForPause || breakForPunctuation || breakForDuration || breakForLength || breakForCapital) {
+        flushCurrent()
+      }
+    }
+
+    current.push(word)
+
+    if (current.length >= minWordsPerLine) {
+      const durationAfterAdd = lineDurationSec()
+      const textAfterAdd = lineTextLength()
+      if (durationAfterAdd >= maxDurationSec || textAfterAdd >= maxChars) {
+        const next = orderedWords[i + 1]
+        const nextPause = next ? (next.start - word.end) : 0
+        const nextStrongPause = nextPause >= strongPauseBreakSec
+        if (!next || nextStrongPause) {
+          flushCurrent()
+        }
+      }
+    }
+  }
+
+  flushCurrent()
+  return lines
+}
+
 /**
  * Generate word-level timestamps from line-level timing.
  * Used when user provides pasted lyrics that have been aligned to audio.
@@ -707,6 +856,11 @@ export async function loadWhisperPipeline(modelId = DEFAULT_WHISPER_MODEL, optio
  * @param {WhisperSegment[]} segments
  * @returns {string}
  */
+/**
+ * Convert Whisper segments to SRT subtitle format.
+ * @param {WhisperSegment[]} segments
+ * @returns {string}
+ */
 export function segmentsToSrt(segments) {
   return segments
     .map((seg, i) => {
@@ -724,79 +878,18 @@ export function segmentsToSrt(segments) {
 
 /**
  * Split long transcript into lyric-style lines based on Whisper word timestamps.
- * Groups words into chunks of targetDuration seconds.
+ * Groups words into chunks using the lyric-aware word builder.
  *
- * @param {WhisperSegment[]} segments - Word-level segments from Whisper
- * @param {{ targetDuration?: number, maxChars?: number }} [options]
+ * @param {WhisperSegment[]} segments - Word-level or sentence-level segments from Whisper
+ * @param {{ maxChars?: number, maxDurationSec?: number, pauseBreakSec?: number, strongPauseBreakSec?: number, minWordsPerLine?: number }} [options]
  * @returns {{ start: number, end: number, text: string, durationMs: number }[]}
  */
 export function segmentsToLyricLines(segments, options = {}) {
-  const { targetDuration = 4, maxChars = 60 } = options
-  if (!segments.length) return []
-
-  // Helper: join word segments preserving Whisper's natural spacing.
-  const joinWords = (segs) => {
-    let result = ''
-    for (let i = 0; i < segs.length; i++) {
-      const t = segs[i].text
-      if (!t) continue
-      if (i === 0) {
-        result = t
-      } else if (t.startsWith(' ') || /^[,.:;!?'")\]}>…–—]/.test(t)) {
-        result += t
-      } else {
-        result += ' ' + t
-      }
-    }
-    return result.replace(/\s+/g, ' ').trim()
-  }
-
-  // A word "starts a new sentence" when its trimmed text begins with an uppercase letter.
-  // This is the primary sentence-boundary cue in Whisper output.
-  const isCapitalStart = (seg) => {
-    const t = seg.text.replace(/^\s+/, '')
-    return t.length > 1 && t[0] === t[0].toUpperCase() && /[A-Z]/.test(t[0])
-  }
-
-  const flushLine = (words, start) => {
-    const text = joinWords(words)
-    if (!text) return null
-    const end = words[words.length - 1].end || start + 1
-    return { start, end, text, durationMs: Math.round((end - start) * 1000) }
-  }
-
-  const lines = []
-  let currentLine = []
-  let lineStart = segments[0].start
-
-  for (let si = 0; si < segments.length; si++) {
-    const seg = segments[si]
-
-    // Capital letter mid-stream → flush current line before this word (new phrase/sentence)
-    if (currentLine.length > 0 && isCapitalStart(seg)) {
-      const flushed = flushLine(currentLine, lineStart)
-      if (flushed) lines.push(flushed)
-      currentLine = []
-      lineStart = seg.start
-    }
-
-    currentLine.push(seg)
-    const lineText = joinWords(currentLine)
-    const duration = (seg.end || seg.start + 1) - lineStart
-
-    if (duration >= targetDuration || lineText.length >= maxChars) {
-      const flushed = flushLine(currentLine, lineStart)
-      if (flushed) lines.push(flushed)
-      currentLine = []
-      lineStart = seg.end || seg.start + 1
-    }
-  }
-
-  // Flush remaining words
-  if (currentLine.length) {
-    const flushed = flushLine(currentLine, lineStart)
-    if (flushed) lines.push(flushed)
-  }
-
-  return lines
+  return buildLyricLinesFromWords(expandSentencesToWords(segments), {
+    maxChars: options.maxChars ?? 42,
+    maxDurationSec: options.maxDurationSec ?? 4.5,
+    pauseBreakSec: options.pauseBreakSec ?? 0.55,
+    strongPauseBreakSec: options.strongPauseBreakSec ?? 0.9,
+    minWordsPerLine: options.minWordsPerLine ?? 2,
+  })
 }

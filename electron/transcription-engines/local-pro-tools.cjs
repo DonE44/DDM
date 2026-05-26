@@ -145,6 +145,56 @@ async function detectPythonPackage(pythonInfo, importName, distName) {
   }
 }
 
+async function detectCudaGpu() {
+  const nvidiaPath = await resolveCommandPath('nvidia-smi')
+  if (!nvidiaPath) {
+    return {
+      available: false,
+      provider: null,
+      gpus: [],
+      message: 'No NVIDIA GPU tooling detected (nvidia-smi not found).',
+    }
+  }
+
+  try {
+    const result = await runProcess('nvidia-smi', ['--query-gpu=name,driver_version,memory.total', '--format=csv,noheader'])
+    if (result.code !== 0) {
+      return {
+        available: false,
+        provider: 'nvidia-smi',
+        gpus: [],
+        message: 'nvidia-smi is installed but GPU query failed.',
+      }
+    }
+
+    const rows = String(result.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+
+    const gpus = rows.map((line) => {
+      const [name, driver, memory] = line.split(',').map((part) => String(part || '').trim())
+      return { name, driverVersion: driver || null, memoryTotal: memory || null }
+    })
+
+    return {
+      available: gpus.length > 0,
+      provider: 'nvidia-smi',
+      gpus,
+      message: gpus.length > 0
+        ? `Detected ${gpus.length} NVIDIA GPU${gpus.length === 1 ? '' : 's'}.`
+        : 'nvidia-smi returned no GPUs.',
+    }
+  } catch {
+    return {
+      available: false,
+      provider: 'nvidia-smi',
+      gpus: [],
+      message: 'Failed to run nvidia-smi GPU query.',
+    }
+  }
+}
+
 function listModelRoots(repoRoot) {
   return [
     path.join(repoRoot, 'models'),
@@ -212,39 +262,69 @@ async function findLikelyModelFolders(repoRoot) {
 }
 
 function summarizeLocalProStatus(report) {
-  if (!report.python.found) {
-    return { setupState: 'Missing Python', setupHint: 'Install Python 3 and make it available on PATH.', foundationAvailable: false }
+  if (report.localProVenv?.ready) {
+    return {
+      setupState: 'Available',
+      setupHint: 'Local Pro venv is ready. Runtime can be enabled for Local Pro preset.',
+      foundationAvailable: true,
+    }
   }
-  if (!report.pip.found) {
-    return { setupState: 'Setup required', setupHint: 'Python was found, but pip is missing or unavailable.', foundationAvailable: false }
+  if (!report.localProVenv?.found) {
+    return {
+      setupState: 'Setup required',
+      setupHint: 'Local Pro requires repo venv at .venv-local-pro with faster-whisper and demucs installed.',
+      foundationAvailable: false,
+    }
   }
-  if (!report.fasterWhisper.found) {
-    return { setupState: 'Missing faster-whisper', setupHint: 'Install faster-whisper in the detected Python environment.', foundationAvailable: false }
+  if (report.localProVenv?.found && !report.localProVenv?.pip?.found) {
+    return {
+      setupState: 'Setup required',
+      setupHint: 'Local Pro venv exists but pip is missing. Repair .venv-local-pro and retry.',
+      foundationAvailable: false,
+    }
   }
-  if (!report.demucs.found) {
-    return { setupState: 'Missing Demucs', setupHint: 'Install demucs in the detected Python environment.', foundationAvailable: false }
+  if (report.localProVenv?.found && !report.localProVenv?.fasterWhisper?.found) {
+    return {
+      setupState: 'Missing faster-whisper',
+      setupHint: 'Install faster-whisper in .venv-local-pro before enabling Local Pro runtime.',
+      foundationAvailable: false,
+    }
   }
-  if (!Array.isArray(report.models) || report.models.length === 0) {
-    return { setupState: 'Setup required', setupHint: 'Tools were found, but no likely model folders were detected yet.', foundationAvailable: true }
+  if (report.localProVenv?.found && !report.localProVenv?.demucs?.found) {
+    return {
+      setupState: 'Missing Demucs',
+      setupHint: 'Install demucs in .venv-local-pro before enabling Local Pro runtime.',
+      foundationAvailable: false,
+    }
   }
-  return { setupState: 'Available', setupHint: 'Local Pro tools were detected. Runtime execution is not enabled in Phase 2A yet.', foundationAvailable: true }
+  return {
+    setupState: 'Setup required',
+    setupHint: 'Local Pro venv is incomplete. Verify .venv-local-pro python + package imports.',
+    foundationAvailable: false,
+  }
 }
 
 async function detectLocalProTools(repoRoot) {
-  const python = await detectPython()
-  const pip = await detectPip(python)
-  const fasterWhisper = await detectPythonPackage(python, 'faster_whisper', 'faster-whisper')
-  const demucs = await detectPythonPackage(python, 'demucs', 'demucs')
+  const localProVenv = await detectRepoVenv(repoRoot)
+  const python = localProVenv?.found
+    ? { found: true, path: localProVenv.path || null, version: localProVenv.version || null }
+    : { found: false, path: null, version: null }
+  const pip = localProVenv?.pip || { found: false, path: null, version: null }
+  const fasterWhisper = localProVenv?.fasterWhisper || { found: false, version: null }
+  const demucs = localProVenv?.demucs || { found: false, version: null }
   const whisperCppAssets = await findWhisperCppAssets(repoRoot)
   const models = await findLikelyModelFolders(repoRoot)
+  const gpu = await detectCudaGpu()
 
   const report = {
     python: { found: !!python.found, path: python.path || null, version: python.version || null },
     pip,
     fasterWhisper,
     demucs,
+    localProVenv,
     whisperCpp: { found: !!whisperCppAssets.executablePath, path: whisperCppAssets.executablePath || null },
     models,
+    gpu,
   }
 
   const summary = summarizeLocalProStatus(report)
@@ -253,10 +333,78 @@ async function detectLocalProTools(repoRoot) {
     setupState: summary.setupState,
     setupHint: summary.setupHint,
     foundationAvailable: summary.foundationAvailable,
-    runtimeEnabled: false,
+    runtimeEnabled: !!localProVenv.ready,
   }
 }
 
 module.exports = {
   detectLocalProTools,
+}
+
+function getRepoVenvPython(repoRoot) {
+  const candidates = process.platform === 'win32'
+    ? [
+      path.join(repoRoot, '.venv-local-pro', 'Scripts', 'python.exe'),
+      path.join(repoRoot, '.venv-local-pro', 'Scripts', 'python'),
+    ]
+    : [
+      path.join(repoRoot, '.venv-local-pro', 'bin', 'python3'),
+      path.join(repoRoot, '.venv-local-pro', 'bin', 'python'),
+    ]
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null
+}
+
+function getRepoVenvPip(repoRoot) {
+  const candidates = process.platform === 'win32'
+    ? [
+      path.join(repoRoot, '.venv-local-pro', 'Scripts', 'pip.exe'),
+      path.join(repoRoot, '.venv-local-pro', 'Scripts', 'pip3.exe'),
+    ]
+    : [
+      path.join(repoRoot, '.venv-local-pro', 'bin', 'pip3'),
+      path.join(repoRoot, '.venv-local-pro', 'bin', 'pip'),
+    ]
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null
+}
+
+async function detectRepoVenv(repoRoot) {
+  const venvPythonPath = getRepoVenvPython(repoRoot)
+  if (!venvPythonPath) {
+    return {
+      found: false,
+      path: null,
+      version: null,
+      pip: { found: false, path: null, version: null },
+      fasterWhisper: { found: false, version: null },
+      demucs: { found: false, version: null },
+      ready: false,
+    }
+  }
+
+  const pythonInfo = {
+    found: true,
+    path: venvPythonPath,
+    version: null,
+    _command: venvPythonPath,
+    _prefixArgs: [],
+  }
+
+  const probe = await detectPythonCandidate(venvPythonPath, [])
+  const pip = await detectPip(pythonInfo)
+  const venvPipPath = getRepoVenvPip(repoRoot)
+  const fasterWhisper = await detectPythonPackage(pythonInfo, 'faster_whisper', 'faster-whisper')
+  const demucs = await detectPythonPackage(pythonInfo, 'demucs', 'demucs')
+
+  return {
+    found: true,
+    path: venvPythonPath,
+    version: probe?.version || null,
+    pip: {
+      ...pip,
+      path: venvPipPath || pip.path || null,
+    },
+    fasterWhisper,
+    demucs,
+    ready: !!pip.found && !!fasterWhisper.found && !!demucs.found,
+  }
 }

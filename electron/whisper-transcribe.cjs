@@ -28,6 +28,7 @@ const os  = require('os')
 const https = require('https')
 const http = require('http')
 const { createTranscriptionEngineManager } = require('./transcription-engines/transcription-engine-manager.cjs')
+const { cancelActiveFasterWhisper } = require('./transcription-engines/faster-whisper-engine.cjs')
 const audioDecode = require('./audio-decode.cjs')
 const { runXenovaFloat32 } = require('./transcription-engines/xenova-engine.cjs')
 const hfAuth = require('./hf-auth.cjs')
@@ -866,6 +867,13 @@ function registerWhisperTranscribeIPC() {
       console.log('[whisper:transcribe] preset:', payload?.selectedPreset || null)
       console.log('[whisper:transcribe] resolvedEngine:', payload?.resolvedEngine || null)
       const output = await runTranscription(event, payload)
+      if (output?.ok === false) {
+        return {
+          ok: false,
+          error: output.error || 'Transcription failed',
+          warnings: Array.isArray(output.warnings) ? output.warnings : [],
+        }
+      }
       // runTranscription now returns pre-processed { start, end, text } chunks directly
       // (manual windowed chunking + hallucination filter + time-proximity dedup applied)
       console.log('[whisper:transcribe] Success, returning result')
@@ -879,9 +887,13 @@ function registerWhisperTranscribeIPC() {
         method: output.method || null,
         model: output.model || payload.modelId || null,
         modelPath: output.modelPath || null,
+        localProProfile: output.localProProfile || null,
         demucsUsed: !!output.demucsUsed,
         beamSize: Number.isFinite(output.beamSize) ? output.beamSize : null,
         vadFilter: typeof output.vadFilter === 'boolean' ? output.vadFilter : null,
+        device: output.device || null,
+        computeType: output.computeType || null,
+        fallbackAllowed: output.fallbackAllowed === true,
         localProTimings: output.localProTimings || null,
         transcriptionDurationSec: Number.isFinite(output.transcriptionDurationSec) ? output.transcriptionDurationSec : null,
         warnings: output.warnings || [],
@@ -924,6 +936,7 @@ function registerWhisperTranscribeIPC() {
 
   ipcMain.handle('whisper:cancel', () => {
     _cancelFlag = true
+    cancelActiveFasterWhisper()
     _loadedPipeline = null
     _loadedModelId  = null
     return { ok: true }

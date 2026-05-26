@@ -543,6 +543,11 @@ interface WhisperResult {
   method?: string | null
   model?: string | null
   modelPath?: string | null
+  demucsUsed?: boolean
+  beamSize?: number | null
+  vadFilter?: boolean | null
+  localProTimings?: unknown
+  transcriptionDurationSec?: number | null
   warnings?: string[]
   gaps?: unknown[]
   containsGasoline?: boolean
@@ -569,6 +574,15 @@ interface WhisperEngineStatusResult {
     pip?: { found?: boolean, path?: string | null, version?: string | null }
     fasterWhisper?: { found?: boolean, version?: string | null }
     demucs?: { found?: boolean, version?: string | null }
+    localProVenv?: {
+      found?: boolean
+      path?: string | null
+      version?: string | null
+      pip?: { found?: boolean, path?: string | null, version?: string | null }
+      fasterWhisper?: { found?: boolean, version?: string | null }
+      demucs?: { found?: boolean, version?: string | null }
+      ready?: boolean
+    }
     whisperCpp?: { found?: boolean, path?: string | null }
     models?: Array<{ path: string, reason?: string, fileCount?: number }>
   }>

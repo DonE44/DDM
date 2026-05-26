@@ -15,7 +15,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { WHISPER_MODELS, DEFAULT_WHISPER_MODEL, transcribe, abortTranscription, segmentsToSrt, segmentsToLyricLines, isWhisperAvailable, clearWhisperCache } from '../utils/whisperUtils.js'
+import { WHISPER_MODELS, DEFAULT_WHISPER_MODEL, transcribe, abortTranscription, segmentsToSrt, buildLyricLinesFromWords, isWhisperAvailable, clearWhisperCache } from '../utils/whisperUtils.js'
 
 /** @typedef {{ start:number, end:number, text:string, durationMs:number }} LyricLine */
 
@@ -34,6 +34,8 @@ function formatCacheBytes(bytes) {
 export default function WhisperPanel({
   /** URL of the audio file to transcribe (pre-filled if caller provides it) */
   audioUrl = '',
+  /** Optional local disk path for engines that require file-system access (Local Pro) */
+  audioFilePath = '',
   /** Audio file name (for display) */
   audioName = '',
   /** Called immediately when transcription succeeds with {text, segments, language}.
@@ -57,6 +59,8 @@ export default function WhisperPanel({
   engineIntent = null,
   /** Resolver output showing active effective engine */
   resolvedEngine = null,
+  /** Local Pro runtime options forwarded to IPC when Local Pro preset is active */
+  localProOptions = null,
   /** Transcription mode for Whisper main-process pipeline */
   transcriptionMode = 'normal',
 }) {
@@ -87,8 +91,12 @@ function ignoreError() {}
   }, [])
 
   useEffect(() => {
-    if (audioUrl) { setCustomAudioUrl(audioUrl); setCustomAudioName(audioName); setCustomAudioFilePath(null) }
-  }, [audioUrl, audioName])
+    if (audioUrl) {
+      setCustomAudioUrl(audioUrl)
+      setCustomAudioName(audioName)
+      setCustomAudioFilePath(audioFilePath || null)
+    }
+  }, [audioUrl, audioName, audioFilePath])
 
   const refreshModelCacheStatus = useCallback(async () => {
     const modelIdForCache = activeModelId.startsWith('whispercpp-') || activeModelId === 'auto-best'
@@ -173,6 +181,20 @@ function ignoreError() {}
 
   const handleTranscribe = useCallback(async () => {
     if (!customAudioUrl || transcribing) return
+
+    const isLocalPro = String(selectedPreset || '').toLowerCase() === 'local-pro' && String(resolvedEngine || '').toLowerCase() === 'local-pro'
+    const localProModel = String(localProOptions?.model || '').toLowerCase()
+    if (isLocalPro && localProModel.includes('large')) {
+      const confirmHeavy = window.confirm(
+        'Large-v3 can stall or time out on some systems. Continue with Pro Heavy anyway?\n\n' +
+        'Recommendation: use Balanced or Fast first for stability.'
+      )
+      if (!confirmHeavy) {
+        setStatus('Cancelled before start. Switched off Large-v3 recommendation shown.')
+        return
+      }
+    }
+
     const hasSharedBuf = typeof SharedArrayBuffer !== 'undefined'
     setTranscribing(true)
     setStatus(hasSharedBuf ? 'Loading model…' : 'Loading model (single-thread mode — no SharedArrayBuffer)…')
@@ -186,6 +208,7 @@ function ignoreError() {}
         selectedPreset,
         engineIntent,
         resolvedEngine,
+        localProOptions,
         audioFilePath: customAudioFilePath || undefined,
         wordTimestamps: true,
         transcriptionMode,
@@ -211,6 +234,8 @@ function ignoreError() {}
             setModelProgress({ status: 'ready', file: '', progress: 100 })
           } else if (prog.status === 'error') {
             setStatus(`❌ Download error: ${prog.error || 'unknown'}`)
+          } else if (file) {
+            setStatus(file)
           }
         },
         onTranscribeProgress: (pct) => {
@@ -230,7 +255,10 @@ function ignoreError() {}
         onTranscribeComplete(res)
       }
       if (!onTranscribeComplete && onCreateLyricPages && res.segments.length > 0) {
-        const autoLines = segmentsToLyricLines(res.segments)
+        const autoLines = buildLyricLinesFromWords(
+          Array.isArray(res.wordTimestamps) && res.wordTimestamps.length ? res.wordTimestamps : res.segments,
+          { maxChars: 42, maxDurationSec: 4.5, pauseBreakSec: 0.55, strongPauseBreakSec: 0.9, minWordsPerLine: 2 },
+        )
         if (autoLines.length > 0) onCreateLyricPages(autoLines)
       }
       refreshModelCacheStatus()
@@ -245,7 +273,7 @@ function ignoreError() {}
     }
   // onTranscribeComplete and onCreateLyricPages are stable callback refs from parent —
   // including them avoids stale closure without causing unnecessary re-runs.
-  }, [activeModelId, customAudioUrl, customAudioFilePath, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey, refreshModelCacheStatus, transcriptionMode, selectedPreset, engineIntent, resolvedEngine])
+  }, [activeModelId, customAudioUrl, customAudioFilePath, transcribing, onTranscribeComplete, onCreateLyricPages, openAiKey, refreshModelCacheStatus, transcriptionMode, selectedPreset, engineIntent, resolvedEngine, localProOptions])
 
   const handleAbort = () => {
     abortTranscription()
@@ -281,7 +309,12 @@ function ignoreError() {}
 
   const srtContent = result.segments.length ? segmentsToSrt(result.segments) : ''
 
-  const lyricLines = result.segments.length ? segmentsToLyricLines(result.segments) : []
+  const lyricLines = result.segments.length
+    ? buildLyricLinesFromWords(
+        Array.isArray(result.wordTimestamps) && result.wordTimestamps.length ? result.wordTimestamps : result.segments,
+        { maxChars: 42, maxDurationSec: 4.5, pauseBreakSec: 0.55, strongPauseBreakSec: 0.9, minWordsPerLine: 2 },
+      )
+    : []
 
   // ── Not available ─────────────────────────────────────────────────────────
   if (available === false) {
@@ -537,7 +570,10 @@ function ignoreError() {}
                       containsFingers: !!result.containsFingers,
                       containsMatch: !!result.containsMatch,
                       firstTenChunks: (result.segments || []).slice(0, 10),
-                      lyricLines: segmentsToLyricLines(result.segments || []),
+                      lyricLines: buildLyricLinesFromWords(
+                        Array.isArray(result.wordTimestamps) && result.wordTimestamps.length ? result.wordTimestamps : (result.segments || []),
+                        { maxChars: 42, maxDurationSec: 4.5, pauseBreakSec: 0.55, strongPauseBreakSec: 0.9, minWordsPerLine: 2 },
+                      ),
                     },
                   })
                   if (r?.ok && r.filePath) setStatus(`🧾 Debug exported: ${r.filePath}`)
